@@ -8,7 +8,12 @@
 [![STT - Faster Whisper](https://img.shields.io/badge/STT-faster--whisper-10b981?style=flat-square)](https://github.com/SYSTRAN/faster-whisper)
 [![License - MIT](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
+> [!NOTE]
+> **Project Background & AI Disclaimer:**  
+> This project was developed primarily through agentic pair programming with an AI coding agent (Google Gemini). It originally served as a practical exploration project to experiment with autonomous coding agents and modern desktop workflows. Because the resulting application proved genuinely useful and interesting for daily workflows, it is being shared openly on GitHub.
+
 ---
+
 
 ## How It Works
 

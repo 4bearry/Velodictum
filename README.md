@@ -1,7 +1,7 @@
 # Velodictum
 
-> **Lokale KI-Spracheingabe und Text-Transformation für Windows**  
-> Ein schlankes, Open-Source-Tool für systemweites Diktieren mit lokaler Spracherkennung (Whisper) und optionaler KI-Nachbearbeitung (Ollama / Cloud-APIs).
+> **Local-first AI Voice Dictation and In-Place Text Transformation for Windows**  
+> A lightweight, open-source desktop tool for system-wide dictation powered by local speech-to-text (Whisper) and optional semantic LLM post-processing (Ollama / Cloud APIs).
 
 [![Platform - Windows](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078d4?style=flat-square)](https://microsoft.com/windows)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)](https://python.org)
@@ -10,138 +10,138 @@
 
 ---
 
-## Funktionsweise
+## How It Works
 
-Velodictum nimmt Sprache über ein globales Tastenkürzel auf, wandelt sie per Whisper in Text um und fügt das Ergebnis automatisch in das gerade aktive Programm (z. B. VS Code, Browser, Word, Slack, Outlook) ein.
+Velodictum records your voice via a global shortcut, transcribes it using Whisper, optionally enhances the transcript using an LLM, and automatically injects the formatted text into whatever application is currently focused (e.g. VS Code, browser, Word, Slack, Outlook).
 
 ```mermaid
 flowchart LR
-    A["Mikrofon-Aufnahme"] --> B["Whisper STT (Lokal oder API)"]
-    B --> C{"Modus"}
-    C -->|Rohdiktat| E["Text-Injektion (Aktives Fenster)"]
-    C -->|Intelligenter Flow| D["LLM Nachbearbeitung (Ollama / API)"]
+    A["Audio Capture"] --> B["Whisper STT (Local or API)"]
+    B --> C{"Mode"}
+    C -->|Raw Bypass| E["Text Injection (Active Window)"]
+    C -->|Intelligent Flow| D["LLM Post-Processing (Ollama / API)"]
     D --> E
 ```
 
-### Hauptfunktionen
+### Core Features
 
-* **Zwei Diktier-Modi**:
-  * **Rohdiktat**: 1:1 Transkription direkt aus Whisper ohne Veränderung.
-  * **Intelligenter Flow**: Bereinigt Füllwörter (*"äh"*, *"ähm"*), korrigiert Versprecher (*"drei, ach nein, vier"*), formatiert Aufzählungen automatisch als Markdown-Listen und wendet optionale Tonalitätsprofile an (Formell, Locker, Prägnant, Akademisch).
-* **Flexible Spracherkennung (STT)**:
-  * **Lokal**: `faster-whisper` (CTranslate2) auf NVIDIA CUDA oder CPU.
-  * **Cloud / API**: Groq (Whisper-Large-v3, <100ms) oder offizielle OpenAI Whisper API.
-* **Flexible KI-Nachbearbeitung**:
-  * **100% Offline**: Lokale Modelle über Ollama (z. B. `qwen2.5:7b` oder `llama3.3`).
-  * **Universal API**: Jeder OpenAI-kompatible Endpoint (OpenRouter, DeepSeek, Together AI, Google Gemini, vLLM).
-* **Text-Transformation per Sprache ("Voice Editor")**:
-  * Text in beliebiger App markieren, `Ctrl + Alt + Space` drücken, Anweisung einsprechen (z. B. *"Formuliere das höflicher"* oder *"Übersetze auf Englisch"*). Der markierte Text wird direkt ersetzt.
-* **Status-Overlay & Audio-Feedback**:
-  * Unaufdringliches Floating-HUD mit Pegelanzeige während der Aufnahme.
-  * Kurze, prozedural generierte Audio-Cues beim Start/Stopp (keine externen Sounddateien nötig).
-* **Fachwörterbuch**:
-  * Eigene Fachbegriffe, Namen und Abkürzungen hinterlegen, die automatisch in den Whisper-Prompt eingespeist werden.
-* **Audio-Helfer**:
-  * **Auto-Ducking**: Senkt Hintergrund-Audio (Musik/Videos) während der Aufnahme automatisch ab.
-  * **Sofort-Abbruch**: Aufnahme jederzeit per `Escape` verwerfen.
-* **Diktier-Notizbuch (Scratchpad)**:
-  * Standalone-Notizfenster (`Ctrl + Shift + D`) für längere Diktate mit 1-Klick-Strukturierung.
+* **Two Operating Modes**:
+  * **Raw Bypass (`raw`)**: 1:1 acoustic transcription directly from Whisper without alterations.
+  * **Intelligent Flow (`flow`)**: Removes filler words (*"um"*, *"uh"*), fixes spoken self-corrections (*"three, wait no, four"*), formats lists as clean Markdown bullet points, and applies optional tone profiles (Formal, Casual, Concise, Academic).
+* **Flexible Speech-to-Text (STT)**:
+  * **Local**: `faster-whisper` (CTranslate2) accelerated on NVIDIA CUDA or CPU.
+  * **Cloud / API**: Groq (Whisper-Large-v3, <100ms) or official OpenAI Whisper API.
+* **Flexible LLM Post-Processing**:
+  * **100% Offline**: Local models via Ollama (e.g., `qwen2.5:7b` or `llama3.3`).
+  * **Universal API**: Any OpenAI-compatible endpoint (OpenRouter, DeepSeek, Together AI, Google Gemini, vLLM).
+* **Voice-Powered Text Transformation ("Voice Editor")**:
+  * Highlight text in any application, press `Ctrl + Alt + Space`, and speak your instruction (e.g. *"Make this sound more polite"* or *"Translate to English"*). The selected text is replaced in-place.
+* **Status Overlay & Audio Feedback**:
+  * Non-intrusive floating HUD with real-time audio visualizer during recording.
+  * Short, procedurally synthesized audio cues on start/stop (zero external audio file dependencies).
+* **Custom Vocabulary**:
+  * Add technical acronyms, personal names, and domain-specific terms that are automatically injected into Whisper's decoding prompt.
+* **Audio Power Tools**:
+  * **Auto-Ducking**: Automatically attenuates background audio (music, videos) during dictation.
+  * **Instant Cancellation**: Press `Escape` at any time to discard the active recording.
+* **Dictation Scratchpad**:
+  * Standalone notepad window (`Ctrl + Shift + D`) for longer brain dumps with 1-click AI note structuring.
 
 ---
 
-## Tastenkürzel
+## Global Hotkeys
 
-| Shortcut | Aktion | Beschreibung |
+| Shortcut | Action | Description |
 | :--- | :--- | :--- |
-| `Ctrl + Alt + Space` *(oder `F8`)* | Diktat starten / stoppen | Nimmt Sprache auf und fügt formatierten Text in die aktive App ein |
-| `Ctrl + Shift + D` | Scratchpad | Öffnet das integrierte Diktier- und Notizfenster |
-| `Ctrl + Alt + Z` | In-Place Editor | Transformiert markierten Text anhand gesprochener Anweisungen |
-| `Escape` | Abbrechen | Verwirft die aktuelle Aufnahme sofort |
+| `Ctrl + Alt + Space` *(or `F8`)* | Start / Stop Dictation | Captures speech and pastes formatted text into the active window |
+| `Ctrl + Shift + D` | Scratchpad | Opens the standalone dictation & note-taking scratchpad |
+| `Ctrl + Alt + Z` | In-Place Voice Editor | Transforms highlighted text based on spoken instructions |
+| `Escape` | Cancel Recording | Immediately discards the ongoing recording |
 
 ---
 
-## Installation & Start
+## Installation & Getting Started
 
-### Voraussetzungen
+### Prerequisites
 * **Windows 10 / 11 (64-bit)**
-* **Python 3.10 bis 3.13**
-* *(Optional)* NVIDIA GPU mit CUDA-Unterstützung (ab 4–6 GB VRAM empfohlen; CPU-Modus funktioniert ebenfalls).
+* **Python 3.10 to 3.13**
+* *(Optional)* NVIDIA GPU with CUDA support (4–6 GB VRAM recommended; CPU mode works out of the box).
 
-### 1. Repository klonen
+### 1. Clone the Repository
 ```powershell
 git clone https://github.com/4bearyy/Velodictum.git
 cd Velodictum
 ```
 
-### 2. Virtuelle Umgebung einrichten & Abhängigkeiten installieren
+### 2. Set Up Virtual Environment & Dependencies
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-*(Optional für GPU-Beschleunigung mit CUDA):*
+*(Optional: For GPU acceleration with CUDA):*
 ```powershell
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 ```
 
-### 3. Anwendung starten
-Du kannst die Anwendung auf zwei Arten starten:
+### 3. Run the Application
+You can start Velodictum in two ways:
 
-* **Per Batch-Datei**: Doppelklick auf [`run.bat`](run.bat)
-* **Per Befehlszeile**:
+* **Via Batch Script**: Double-click [`run.bat`](run.bat)
+* **Via Command Line**:
   ```powershell
   python main.py
   ```
 
 ---
 
-## Standalone-Executable erstellen (.exe)
+## Building a Standalone Executable (.exe)
 
-Wenn du Velodictum als portable `.exe` ohne Python-Abhängigkeit verteilen möchtest, hast du zwei Optionen:
+To package Velodictum into a portable `.exe` without requiring Python on target machines:
 
-### Option A: Über die Batch-Datei (empfohlen)
-Doppelklick auf [`build.bat`](build.bat) – das Skript prüft die Umgebung, installiert bei Bedarf PyInstaller und kann auf Wunsch direkt ein fertiges ZIP-Archiv in `dist/` erstellen.
+### Option A: Using the Batch Script (Recommended)
+Double-click [`build.bat`](build.bat) – it verifies the environment, installs PyInstaller if needed, and can optionally create a release-ready ZIP in `dist/`.
 
-### Option B: Über Python direkt
+### Option B: Using Python Directly
 ```powershell
 pip install -r requirements-dev.txt
 python build_executable.py
 ```
-Die fertige Anwendung liegt anschließend im Ordner `dist/Velodictum/`.
+The resulting executable will be in the `dist/Velodictum/` directory.
 
 ---
 
-## Projektstruktur
+## Project Structure
 
 ```text
 Velodictum/
-├── .ai/                 # Systemkontext & Architekturentscheidungen
-├── core/                # Anwendungs- & Audio-Engine (Whisper, LLM, Config)
-├── gui/                 # Dashboard, Mini-HUD & Themes (PyQt6)
-├── tests/               # Unit- & End-to-End Test-Suiten
-├── rthooks/             # PyInstaller Runtime-Hooks
-├── build.bat / run.bat  # 1-Klick Windows Starter- & Build-Skripte
-├── build_executable.py  # PyInstaller Builder
-├── main.py              # Einstiegspunkt
-├── requirements.txt     # Python Abhängigkeiten
-└── README.md            # Dokumentation
+├── .ai/                 # System context & architecture decision records (ADRs)
+├── core/                # Core processing engine (Whisper STT, LLM, audio, config)
+├── gui/                 # Dashboard, Mini-HUD & theme widgets (PyQt6)
+├── tests/               # Unit & end-to-end test suites
+├── rthooks/             # PyInstaller runtime security hooks
+├── build.bat / run.bat  # 1-click Windows starter and build scripts
+├── build_executable.py  # PyInstaller standalone builder
+├── main.py              # Application entry point
+├── requirements.txt     # Runtime dependencies
+└── README.md            # Documentation
 ```
 
 ---
 
-## Datenschutz & Sicherheit
+## Privacy & Security
 
-
-* **Offline-Standard**: Bei lokaler STT und lokaler Ollama-Nutzung verlassen Audiodaten und Texte zu keinem Zeitpunkt deinen Rechner.
-* **Sichere Key-Verwaltung**: Cloud-API-Schlüssel werden über den Windows Credential Vault verschlüsselt hinterlegt und in der Oberfläche nur maskiert dargestellt.
+* **Offline-First**: In local STT and local Ollama mode, audio data and text never leave your machine.
+* **Secure Key Storage**: Cloud API keys are securely stored in the Windows Credential Vault using DPAPI encryption and masked in the UI.
 
 ---
 
-## Lizenz
+## License
 
-Dieses Projekt ist unter der [MIT License](LICENSE) lizenziert.  
-Copyright (c) 2026 4bearyy.
+This project is licensed under the [MIT License](LICENSE).  
+Copyright (c) 2026 Lion Richter.
+
 
 
 

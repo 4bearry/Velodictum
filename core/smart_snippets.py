@@ -14,7 +14,7 @@ from config import get_app_dir, validate_safe_filepath, safe_atomic_json_write
 
 SNIPPETS_FILE = os.path.join(get_app_dir(), "snippets.json")
 
-DEFAULT_SNIPPETS: List[Dict[str, str]] = [
+DEFAULT_SNIPPETS_DE: List[Dict[str, str]] = [
     {
         "trigger": "meine signatur",
         "expansion": "Mit freundlichen Grüßen,\n[Ihr Name]",
@@ -37,6 +37,43 @@ DEFAULT_SNIPPETS: List[Dict[str, str]] = [
     },
 ]
 
+DEFAULT_SNIPPETS_EN: List[Dict[str, str]] = [
+    {
+        "trigger": "my signature",
+        "expansion": "Best regards,\n[Your Name]",
+        "description": "Standard email signature",
+    },
+    {
+        "trigger": "today's date",
+        "expansion": "{date}",
+        "description": "Current date (YYYY-MM-DD)",
+    },
+    {
+        "trigger": "current time",
+        "expansion": "{time}",
+        "description": "Current time (12-hour format)",
+    },
+    {
+        "trigger": "my clipboard",
+        "expansion": "{clipboard}",
+        "description": "Paste clipboard content",
+    },
+]
+
+DEFAULT_SNIPPETS = DEFAULT_SNIPPETS_EN
+
+
+def get_default_snippets(lang: Optional[str] = None) -> List[Dict[str, str]]:
+    if not lang:
+        try:
+            from config import config
+            lang = getattr(config.system, "ui_language", "en")
+        except Exception:
+            lang = "en"
+    if str(lang).lower().startswith("de"):
+        return list(DEFAULT_SNIPPETS_DE)
+    return list(DEFAULT_SNIPPETS_EN)
+
 
 class SnippetManager:
     def __init__(self, filepath: str = SNIPPETS_FILE):
@@ -48,18 +85,19 @@ class SnippetManager:
 
     def load(self):
         with self._lock:
+            defaults = get_default_snippets()
             if os.path.exists(self.filepath):
                 try:
                     with open(self.filepath, "r", encoding="utf-8") as f:
                         data = json.load(f)
                         if isinstance(data, dict):
-                            self.snippets = data.get("snippets", list(DEFAULT_SNIPPETS))
+                            self.snippets = data.get("snippets", defaults)
                             self.enabled = data.get("enabled", True)
                             return
                 except Exception as e:
                     print(f"[Snippets] Error loading snippets: {e}")
 
-            self.snippets = list(DEFAULT_SNIPPETS)
+            self.snippets = list(defaults)
             self.enabled = True
             self._save_locked()
 

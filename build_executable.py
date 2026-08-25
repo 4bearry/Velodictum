@@ -20,6 +20,15 @@ def build():
     print("=" * 60)
 
     project_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Use a temp directory outside OneDrive to avoid sync-related file locks
+    import tempfile
+    build_tmp = os.path.join(tempfile.gettempdir(), "VelodictumBuild")
+    dist_tmp  = os.path.join(tempfile.gettempdir(), "VelodictumDist")
+    os.makedirs(build_tmp, exist_ok=True)
+    os.makedirs(dist_tmp, exist_ok=True)
+
+    # Final destination inside the project (copied after successful build)
     dist_dir = os.path.join(project_dir, "dist", "Velodictum")
 
     # ------------------------------------------------------------------
@@ -87,6 +96,8 @@ def build():
         "--windowed",
         "--clean",
         "--noconfirm",
+        f"--distpath={dist_tmp}",
+        f"--workpath={build_tmp}",
         "--runtime-hook=rthooks/pyi_rth_dll_security.py",
         "--collect-all=faster_whisper",
 
@@ -114,13 +125,20 @@ def build():
     res = subprocess.run(pyinstaller_cmd, cwd=project_dir)
 
     if res.returncode != 0:
-        print(f"\n[FEHLER] PyInstaller Build fehlgeschlagen (Exit-Code {res.returncode})")
+        print(f"\n[ERROR] PyInstaller build failed (exit code {res.returncode})")
         sys.exit(1)
+
+    # Copy the result from temp dist back to the project's dist/ folder
+    print("\n[1.5/3] Copying build output to dist/Velodictum/...")
+    if os.path.exists(dist_dir):
+        shutil.rmtree(dist_dir)
+    shutil.copytree(os.path.join(dist_tmp, "Velodictum"), dist_dir)
+    print(f"      Copied to: {dist_dir}")
 
     # ------------------------------------------------------------------
     # 4. Post-build: Ensure all CUDA DLLs and data files are in place
     # ------------------------------------------------------------------
-    print("\n[2/3] Bereite neutrale App-Struktur und CUDA-Treiber vor...")
+    print("\n[2/3] Setting up app structure and CUDA drivers...")
 
     # Copy template configs
     for json_file in ["app_profiles.json"]:
@@ -167,19 +185,19 @@ def build():
 
         print()
         print("=" * 60)
-        print("  [ERFOLG] Velodictum erfolgreich gebaut!")
+        print("  [SUCCESS] Velodictum built successfully!")
         print("=" * 60)
-        print(f"  Exe:            {exe_path}")
-        print(f"  Exe-Groesse:    {size_mb:.1f} MB")
-        print(f"  Ordner-Gesamt:  {total_size:.0f} MB")
+        print(f"  Exe:           {exe_path}")
+        print(f"  Exe size:      {size_mb:.1f} MB")
+        print(f"  Folder total:  {total_size:.0f} MB")
         print()
-        print("  Zum Weitergeben:")
-        print(f"  -> Den gesamten Ordner 'dist\\Velodictum\\' als ZIP verpacken.")
-        print("  -> Dein Freund entpackt die ZIP und startet Velodictum.exe.")
-        print("  -> Keine Python-Installation noetig!")
+        print("  To distribute:")
+        print("  -> ZIP the entire 'dist\\Velodictum\\' folder.")
+        print("  -> The recipient extracts it and runs Velodictum.exe.")
+        print("  -> No Python installation required!")
         print("=" * 60)
     else:
-        print("\n[WARNUNG] Velodictum.exe nicht in dist/ gefunden.")
+        print("\n[WARNING] Velodictum.exe not found in dist/.")
 
 
 if __name__ == "__main__":

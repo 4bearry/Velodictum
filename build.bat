@@ -6,86 +6,85 @@ echo ============================================================
 echo   VELODICTUM - WINDOWS BUILD ENGINE
 echo ============================================================
 echo.
-echo   Dieses Skript erstellt eine portable Velodictum.exe,
-echo   die ohne Python-Installation auf jedem Windows-PC laeuft.
+echo   This script creates a portable Velodictum.exe that runs
+echo   on any Windows PC without requiring a Python installation.
 echo.
 echo ============================================================
 
 :: ---------------------------------------------------------------
-:: 1. Pruefe virtuelle Umgebung
+:: 1. Check virtual environment
 :: ---------------------------------------------------------------
 if not exist ".venv\Scripts\python.exe" (
     echo.
-    echo   [FEHLER] Virtuelle Python-Umgebung nicht gefunden.
-    echo   Bitte zuerst einrichten:
+    echo   [ERROR] Virtual Python environment not found.
+    echo   Please set it up first:
     echo.
     echo     python -m venv .venv
     echo     .venv\Scripts\pip install -r requirements.txt
-    echo     .venv\Scripts\pip install pyinstaller
+    echo     .venv\Scripts\pip install -r requirements-dev.txt
     echo.
     pause
     exit /b 1
 )
 
 :: ---------------------------------------------------------------
-:: 2. Pruefe ob PyInstaller installiert ist
+:: 2. Check if PyInstaller is installed, install from requirements-dev.txt if not
 :: ---------------------------------------------------------------
 .venv\Scripts\python.exe -c "import PyInstaller" 2>nul
 if errorlevel 1 (
     echo.
-    echo   [INFO] PyInstaller nicht gefunden. Wird jetzt installiert...
-    .venv\Scripts\pip install pyinstaller pyinstaller-hooks-contrib
+    echo   [INFO] PyInstaller not found. Installing from requirements-dev.txt...
+    .venv\Scripts\pip install -r requirements-dev.txt
     echo.
 )
 
 :: ---------------------------------------------------------------
-:: 3. Build starten
+:: 3. Start build
 :: ---------------------------------------------------------------
 echo.
-echo   Build wird gestartet...
+echo   Starting build...
 echo.
 
 .venv\Scripts\python.exe build_executable.py
 
 if errorlevel 1 (
     echo.
-    echo   [FEHLER] Build fehlgeschlagen. Siehe Ausgabe oben.
+    echo   [ERROR] Build failed. See output above for details.
     echo.
     pause
     exit /b 1
 )
 
 :: ---------------------------------------------------------------
-:: 4. Optional: ZIP erstellen
+:: 4. Optional: Create ZIP archive
 :: ---------------------------------------------------------------
 echo.
-set /p zipChoice="  ZIP-Archiv zum Weitergeben erstellen? (j/n): "
-if /i "%zipChoice%"=="j" (
+set /p zipChoice="  Create a ZIP archive for distribution? (y/n): "
+if /i "%zipChoice%"=="y" (
     echo.
-    echo   Erstelle ZIP-Archiv...
+    echo   Creating ZIP archive...
 
     if exist "dist\Velodictum.zip" del "dist\Velodictum.zip"
 
-    :: Versuche PowerShell Compress-Archive (Windows 10+)
     powershell -NoProfile -Command "Compress-Archive -Path 'dist\Velodictum\*' -DestinationPath 'dist\Velodictum.zip' -Force" 2>nul
 
     if exist "dist\Velodictum.zip" (
         echo.
         echo   ============================================================
-        echo   [FERTIG] ZIP erstellt: dist\Velodictum.zip
+        echo   [DONE] ZIP created: dist\Velodictum.zip
         echo.
-        echo   Sende diese ZIP an deinen Freund.
-        echo   Er entpackt sie und startet Velodictum.exe - fertig!
+        echo   Share this ZIP file. The recipient extracts it and
+        echo   runs Velodictum.exe directly - no Python required!
         echo   ============================================================
     ) else (
         echo.
-        echo   [HINWEIS] ZIP konnte nicht automatisch erstellt werden.
-        echo   Bitte den Ordner dist\Velodictum\ manuell als ZIP verpacken.
+        echo   [NOTE] ZIP could not be created automatically.
+        echo   Please manually zip the dist\Velodictum\ folder.
     )
 )
 
 echo.
 echo   ============================================================
-echo   Build abgeschlossen. Druecke eine beliebige Taste zum Beenden.
+echo   Build complete. Press any key to exit.
 echo   ============================================================
 pause >nul

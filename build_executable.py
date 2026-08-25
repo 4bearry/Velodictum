@@ -33,11 +33,6 @@ def build():
         if os.path.exists(src):
             data_files.append(f"--add-data={json_file};.")
 
-    # Audio cue WAV files
-    audio_cues_dir = os.path.join(project_dir, "audio_cues")
-    if os.path.isdir(audio_cues_dir):
-        data_files.append(f"--add-data=audio_cues;audio_cues")
-
     # ------------------------------------------------------------------
     # 2. Hidden imports for dynamic/lazy imports that PyInstaller misses
     # ------------------------------------------------------------------

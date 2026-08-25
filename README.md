@@ -3,7 +3,8 @@
 > **High-Performance, Local-First AI Dictation & Voice Transformation Assistant for Windows 11 / 10**  
 > An open-source, provider-agnostic desktop alternative to macOS-only voice dictation tools (Wispr Flow / Superwhisper).
 
-[![Built by AI-Bear](https://img.shields.io/badge/Author-AI--Bear-7c3aed?style=flat-square)](https://github.com)
+[![Built by 4bearyy](https://img.shields.io/badge/Author-4bearyy-7c3aed?style=flat-square)](https://github.com/4bearyy)
+
 [![Platform - Windows 11](https://img.shields.io/badge/Platform-Windows%2011%20%7C%2010-0078d4?style=flat-square)](https://microsoft.com/windows)
 [![STT - Faster Whisper](https://img.shields.io/badge/STT-faster--whisper%20(CUDA%20%2F%20CPU)-10b981?style=flat-square)](https://github.com/SYSTRAN/faster-whisper)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)](https://python.org)
@@ -151,5 +152,6 @@ The compiled executable will be placed in the `dist/` directory.
 ## License
 
 This project is licensed under the [MIT License](LICENSE) - see the [LICENSE](LICENSE) file for details.  
-Created by **AI-Bear** (2026).
+Created by **4bearyy** (2026).
+
 

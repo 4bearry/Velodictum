@@ -1,7 +1,7 @@
 # Velodictum
 
 > **Local-first AI Voice Dictation and In-Place Text Transformation for Windows**  
-> A lightweight, open-source desktop tool for system-wide dictation powered by local speech-to-text (Whisper) and optional semantic LLM post-processing (Ollama / Cloud APIs).
+> A lightweight, open-source desktop tool for system-wide dictation powered by local or cloud speech-to-text models and optional semantic LLM post-processing (Ollama / Cloud APIs).
 
 [![Platform - Windows](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078d4?style=flat-square)](https://microsoft.com/windows)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square)](https://python.org)
@@ -10,7 +10,7 @@
 
 > [!NOTE]
 > **Project Background & AI Disclaimer:**  
-> This project was developed primarily through agentic pair programming with an AI coding agent (Google Gemini). It originally served as a practical exploration project to experiment with autonomous coding agents and modern desktop workflows. Because the resulting application proved genuinely useful and interesting for daily workflows, it is being shared openly on GitHub.
+> This project was developed primarily through agentic pair programming with an AI coding agent (Google Gemini). It originally served as a practical exploration project to experiment with autonomous coding agents and modern desktop workflows. Because the resulting application proved genuinely useful and interesting for my daily workflow, it is being shared openly on GitHub.
 
 ---
 

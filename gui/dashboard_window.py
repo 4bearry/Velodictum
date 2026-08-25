@@ -2226,9 +2226,9 @@ class DashboardWindow(QMainWindow):
         self.lbl_gem_model = QLabel("Gemini Modell:")
         self.lbl_gem_model.setStyleSheet("font-weight: 500; min-width: 170px; color: #9d9da8;")
         self.combo_gem_model = QComboBox()
-        self.combo_gem_model.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"])
+        self.combo_gem_model.addItems(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"])
         cur_gem_model = getattr(config.formatting, "gemini_model", "gemini-2.5-flash")
-        if cur_gem_model in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]:
+        if cur_gem_model in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"]:
             self.combo_gem_model.setCurrentText(cur_gem_model)
         self.combo_gem_model.currentTextChanged.connect(self._on_gem_model_changed)
         row_gem_model.addWidget(self.lbl_gem_model)

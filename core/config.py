@@ -15,10 +15,14 @@ def get_app_dir() -> str:
     """Returns the base application directory for persistent user configuration files."""
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    base = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(base) == "core":
+        return os.path.dirname(base)
+    return base
 
 
 SETTINGS_FILE = os.path.join(get_app_dir(), "settings.json")
+
 
 
 @dataclass

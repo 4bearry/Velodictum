@@ -6,7 +6,16 @@ import sys
 import os
 import ctypes
 
+# Register core package and project root on sys.path
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_CORE_DIR = os.path.join(_PROJECT_ROOT, "core")
+if _CORE_DIR not in sys.path:
+    sys.path.insert(0, _CORE_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(1, _PROJECT_ROOT)
+
 # Early Win32 Binary Search Order Hardening (Mitigates DLL Preloading / Hijacking)
+
 if sys.platform == "win32":
     try:
         kernel32 = ctypes.windll.kernel32

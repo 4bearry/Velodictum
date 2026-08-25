@@ -112,7 +112,26 @@ Die fertige Anwendung liegt anschließend im Ordner `dist/Velodictum/`.
 
 ---
 
+## Projektstruktur
+
+```text
+Velodictum/
+├── .ai/                 # Systemkontext & Architekturentscheidungen
+├── core/                # Anwendungs- & Audio-Engine (Whisper, LLM, Config)
+├── gui/                 # Dashboard, Mini-HUD & Themes (PyQt6)
+├── tests/               # Unit- & End-to-End Test-Suiten
+├── rthooks/             # PyInstaller Runtime-Hooks
+├── build.bat / run.bat  # 1-Klick Windows Starter- & Build-Skripte
+├── build_executable.py  # PyInstaller Builder
+├── main.py              # Einstiegspunkt
+├── requirements.txt     # Python Abhängigkeiten
+└── README.md            # Dokumentation
+```
+
+---
+
 ## Datenschutz & Sicherheit
+
 
 * **Offline-Standard**: Bei lokaler STT und lokaler Ollama-Nutzung verlassen Audiodaten und Texte zu keinem Zeitpunkt deinen Rechner.
 * **Sichere Key-Verwaltung**: Cloud-API-Schlüssel werden über den Windows Credential Vault verschlüsselt hinterlegt und in der Oberfläche nur maskiert dargestellt.

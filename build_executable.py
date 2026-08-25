@@ -100,7 +100,10 @@ def build():
         "--collect-all=nvidia_cublas_cu12",
         "--collect-all=nvidia_cudnn_cu12",
         "--collect-all=nvidia_cuda_nvrtc_cu12",
+        "--paths=core",
+        "--paths=.",
     ]
+
 
     for imp in hidden_imports:
         pyinstaller_cmd.append(f"--hidden-import={imp}")

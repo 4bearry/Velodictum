@@ -2174,9 +2174,9 @@ class DashboardWindow(QMainWindow):
         self.lbl_oai_model = QLabel("OpenAI Modell:")
         self.lbl_oai_model.setStyleSheet("font-weight: 500; min-width: 170px; color: #9d9da8;")
         self.combo_oai_model = QComboBox()
-        self.combo_oai_model.addItems(["gpt-4o-mini", "gpt-4o", "o1-mini", "gpt-3.5-turbo"])
+        self.combo_oai_model.addItems(["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o3-mini", "o4-mini"])
         cur_oai_model = getattr(config.formatting, "openai_model", "gpt-4o-mini")
-        if cur_oai_model in ["gpt-4o-mini", "gpt-4o", "o1-mini", "gpt-3.5-turbo"]:
+        if cur_oai_model in ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o3-mini", "o4-mini"]:
             self.combo_oai_model.setCurrentText(cur_oai_model)
         self.combo_oai_model.currentTextChanged.connect(self._on_oai_model_changed)
         self.combo_o_model = self.combo_oai_model

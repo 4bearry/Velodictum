@@ -88,8 +88,8 @@ def build():
         "--clean",
         "--noconfirm",
         "--runtime-hook=rthooks/pyi_rth_dll_security.py",
-        "--uac-admin=False",
         "--collect-all=faster_whisper",
+
         "--collect-all=ctranslate2",
         "--collect-all=onnxruntime",
         "--collect-all=nvidia_cublas_cu12",

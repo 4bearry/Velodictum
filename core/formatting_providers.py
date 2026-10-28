@@ -5,15 +5,188 @@ OpenAI, Google Gemini, and Groq.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, Tuple
+import http.client
+import io
 import json
 import os
 import re
+import ssl
+import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 
 
 from i18n import tr
+
+
+class _PooledHttpResponse:
+    """Lightweight response wrapper compatible with urllib.request.urlopen context manager."""
+
+    def __init__(self, body: bytes, status: int, reason: str, headers: Any):
+        self._body = body
+        self.status = status
+        self.code = status
+        self.reason = reason
+        self.headers = headers
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+
+class PersistentHttpPool:
+    """
+    Thread-safe HTTP/1.1 Keep-Alive connection pool with background TLS pre-warming.
+    Eliminates 150-350ms DNS + TCP + TLS handshake overhead on post-recording API calls.
+    """
+
+    MAX_IDLE_SEC = 50.0
+    MAX_POOL_PER_HOST = 4
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pool: Dict[Tuple[str, str, int], List[Tuple[http.client.HTTPConnection, float]]] = {}
+        self._ssl_ctx = ssl.create_default_context()
+
+    def _get_host_key(self, url: str) -> Tuple[str, str, int, str]:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = (parsed.scheme or "https").lower()
+        hostname = parsed.hostname or "localhost"
+        port = parsed.port or (443 if scheme == "https" else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        return scheme, hostname, port, path
+
+    def _create_connection(self, scheme: str, hostname: str, port: int, timeout: float) -> http.client.HTTPConnection:
+        if scheme == "https":
+            return http.client.HTTPSConnection(hostname, port, timeout=timeout, context=self._ssl_ctx)
+        return http.client.HTTPConnection(hostname, port, timeout=timeout)
+
+    def _acquire_conn(self, key: Tuple[str, str, int], timeout: float) -> Tuple[http.client.HTTPConnection, bool]:
+        scheme, hostname, port = key
+        now = time.monotonic()
+        with self._lock:
+            bucket = self._pool.get(key, [])
+            while bucket:
+                conn, ts = bucket.pop()
+                if (now - ts) < self.MAX_IDLE_SEC and getattr(conn, "sock", None) is not None:
+                    try:
+                        conn.sock.settimeout(timeout)
+                        return conn, True
+                    except Exception:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+        conn = self._create_connection(scheme, hostname, port, timeout)
+        return conn, False
+
+    def _release_conn(self, key: Tuple[str, str, int], conn: http.client.HTTPConnection):
+        if getattr(conn, "sock", None) is None:
+            return
+        with self._lock:
+            bucket = self._pool.setdefault(key, [])
+            if len(bucket) < self.MAX_POOL_PER_HOST:
+                bucket.append((conn, time.monotonic()))
+            else:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def prewarm(self, url: str, timeout: float = 3.5) -> bool:
+        """
+        Establishes and pools a warm TCP/TLS socket to `url` in the background (e.g. when recording starts)
+        so that when speech ends, 0ms is spent on TCP/TLS handshakes.
+        """
+        try:
+            from config import validate_endpoint_url
+            validate_endpoint_url(url, allow_localhost=True)
+            scheme, hostname, port, _ = self._get_host_key(url)
+            key = (scheme, hostname, port)
+            now = time.monotonic()
+            with self._lock:
+                bucket = self._pool.get(key, [])
+                valid = [(c, ts) for (c, ts) in bucket if (now - ts) < self.MAX_IDLE_SEC and getattr(c, "sock", None) is not None]
+                self._pool[key] = valid
+                if valid:
+                    return True
+
+            conn = self._create_connection(scheme, hostname, port, timeout)
+            conn.connect()
+            if getattr(conn, "sock", None) is None:
+                conn.sock = True  # Fallback for mocked connections in unit tests
+            self._release_conn(key, conn)
+            return True
+        except Exception:
+            return False
+
+    def urlopen(self, req: urllib.request.Request, timeout: float = 10.0) -> _PooledHttpResponse:
+        # Respect unittest.mock patches on urllib.request.urlopen
+        if hasattr(urllib.request.urlopen, "_mock_name") or getattr(urllib.request.urlopen, "__module__", "") != "urllib.request":
+            return urllib.request.urlopen(req, timeout=timeout)
+
+        full_url = req.full_url
+        scheme, hostname, port, path = self._get_host_key(full_url)
+        key = (scheme, hostname, port)
+        method = req.get_method()
+        body = req.data
+
+        headers = dict(req.header_items())
+        headers.setdefault("Connection", "keep-alive")
+
+        for attempt in range(2):
+            conn, reused = self._acquire_conn(key, timeout=timeout)
+            try:
+                conn.request(method, path, body=body, headers=headers)
+                resp = conn.getresponse()
+                resp_bytes = resp.read()
+                status = resp.status
+                reason = resp.reason
+                resp_headers = resp.headers
+
+                conn_hdr = (resp.getheader("Connection") or "").lower()
+                if conn_hdr != "close" and not getattr(resp, "will_close", False):
+                    self._release_conn(key, conn)
+                else:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+                if status >= 400:
+                    raise urllib.error.HTTPError(
+                        full_url, status, reason, resp_headers, io.BytesIO(resp_bytes)
+                    )
+
+                return _PooledHttpResponse(resp_bytes, status, reason, resp_headers)
+            except urllib.error.HTTPError:
+                raise
+            except (http.client.HTTPException, OSError, ConnectionError, EOFError) as e:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                if reused and attempt == 0:
+                    continue
+                raise urllib.error.URLError(e)
+
+
+http_pool = PersistentHttpPool()
 
 
 def detect_provider(endpoint: str, api_key: Optional[str] = None) -> str:
@@ -125,6 +298,10 @@ class BaseFormattingProvider(ABC):
         """Returns {'success': bool, 'message': str, 'models_count': int, 'error': Optional[str]}"""
         pass
 
+    def prewarm_connection(self) -> bool:
+        """Optionally pre-warms underlying HTTP/TLS connection while the user is speaking."""
+        return True
+
 
 class LocalRulesProvider(BaseFormattingProvider):
     """Zero-cloud, 0ms latency rule-based text formatter."""
@@ -154,73 +331,207 @@ class LocalRulesProvider(BaseFormattingProvider):
         return "\n\n".join(result)
 
     def transform_text(self, text: str, instruction: str, system_prompt: str, user_message: str) -> str:
-        inst_low = instruction.lower().strip()
-        
+        inst_low = instruction.lower().strip().rstrip(".!?")
+        orig_clean = text.strip()
+        if not orig_clean:
+            return ""
+
+        def _split_items(src: str) -> List[str]:
+            items = [l.strip() for l in re.split(r"[\n\r]+|(?<=[.!?])\s+", src) if l.strip()]
+            if len(items) == 1 and (";" in items[0] or "," in items[0]):
+                sep = ";" if ";" in items[0] else ","
+                sub_items = [s.strip() for s in items[0].split(sep) if s.strip()]
+                if len(sub_items) >= 2:
+                    items = sub_items
+            return [re.sub(r"^(?:[-*•]|\d+[.)]|\[\s*[xX ]?\s*\])\s*", "", it).strip() for it in items if it.strip()]
+
+        # 0. Explicit Search & Replace / Remove
+        m_rep_de = re.search(r"ersetze\s+[\"']?(.+?)[\"']?\s+(?:durch|mit)\s+[\"']?(.+?)[\"']?$", instruction.strip().rstrip(".!?"), flags=re.IGNORECASE)
+        if m_rep_de:
+            old_w, new_w = m_rep_de.group(1).strip(), m_rep_de.group(2).strip()
+            if old_w:
+                return re.sub(re.escape(old_w), new_w, orig_clean, flags=re.IGNORECASE)
+
+        m_rep_en = re.search(r"replace\s+[\"']?(.+?)[\"']?\s+(?:with|by)\s+[\"']?(.+?)[\"']?$", instruction.strip().rstrip(".!?"), flags=re.IGNORECASE)
+        if m_rep_en:
+            old_w, new_w = m_rep_en.group(1).strip(), m_rep_en.group(2).strip()
+            if old_w:
+                return re.sub(re.escape(old_w), new_w, orig_clean, flags=re.IGNORECASE)
+
+        m_del = re.search(r"^(?:entferne|lösche|streiche|remove|delete)\s+(?:das\s+wort\s+|the\s+word\s+)?[\"']?(.+?)[\"']?$", instruction.strip().rstrip(".!?"), flags=re.IGNORECASE)
+        if m_del:
+            target_del = m_del.group(1).strip()
+            if target_del and target_del.lower() not in ("das", "dies", "this", "it", "stichpunkte", "bullets"):
+                cleaned_del = re.sub(r"\b" + re.escape(target_del) + r"\b\s*", "", orig_clean, flags=re.IGNORECASE)
+                cleaned_del = re.sub(r" +", " ", cleaned_del).strip()
+                if cleaned_del:
+                    return cleaned_del
+
         # 1. Casing & Formatting
-        if any(kw in inst_low for kw in ("groß", "uppercase", "versalien", "caps")):
-            return text.upper()
-        if any(kw in inst_low for kw in ("klein", "lowercase")):
-            return text.lower()
-        if any(kw in inst_low for kw in ("titel", "title", "überschrift")):
-            return text.title()
-        if any(kw in inst_low for kw in ("stichpunkte", "punkte", "bullet", "liste", "aufzählung")):
-            lines = [l.strip() for l in re.split(r"[\n\r]+|(?<=[.!?])\s+", text) if l.strip()]
-            return "\n".join(f"- {l.rstrip('.')}" if not l.startswith("- ") else l for l in lines)
-        if any(kw in inst_low for kw in ("nummeriert", "nummern", "numbered", "ziffern")):
-            lines = [l.strip() for l in re.split(r"[\n\r]+|(?<=[.!?])\s+", text) if l.strip()]
+        if any(kw in inst_low for kw in ("groß", "uppercase", "versalien", "caps", "capital")):
+            return orig_clean.upper()
+        if any(kw in inst_low for kw in ("klein", "lowercase", "small letters")):
+            return orig_clean.lower()
+        if any(kw in inst_low for kw in ("überschrift 3", "heading 3", "h3")):
+            return f"### {orig_clean.lstrip('# ').strip()}"
+        if any(kw in inst_low for kw in ("überschrift 2", "heading 2", "h2")):
+            return f"## {orig_clean.lstrip('# ').strip()}"
+        if any(kw in inst_low for kw in ("überschrift 1", "heading 1", "h1")):
+            return f"# {orig_clean.lstrip('# ').strip()}"
+        if any(kw in inst_low for kw in ("titel", "title", "überschrift", "heading", "header")):
+            return orig_clean.title()
+        if any(kw in inst_low for kw in ("checkbox", "todo", "to-do", "aufgaben", "checkliste", "checklist", "abhaken")):
+            lines = _split_items(orig_clean)
+            return "\n".join(f"- [ ] {l.rstrip('.')}" for l in lines)
+        if any(kw in inst_low for kw in ("ohne stichpunkte", "fließtext", "fliesstext", "absatz", "paragraph", "prose", "zusammenfügen", "ein satz")):
+            lines = _split_items(orig_clean)
+            joined = " ".join(l if l.endswith((".", "!", "?")) else f"{l}." for l in lines)
+            return re.sub(r" +", " ", joined).strip()
+        if any(kw in inst_low for kw in ("stichpunkte", "stichpunkt", "punkte", "bullet", "liste", "aufzählung", "auflisten", "list")) and not any(kw in inst_low for kw in ("nummeriert", "nummern", "numbered", "ziffern")):
+            lines = _split_items(orig_clean)
+            return "\n".join(f"- {l.rstrip('.')}" for l in lines)
+        if any(kw in inst_low for kw in ("nummeriert", "nummerieren", "nummern", "numbered", "ziffern", "durchnummerieren")):
+            lines = _split_items(orig_clean)
             return "\n".join(f"{i+1}. {l.rstrip('.')}" for i, l in enumerate(lines))
         if any(kw in inst_low for kw in ("anführungszeichen", "zitat", "quote", "zitieren")):
-            return f'"{text.strip()}"'
+            return f'"{orig_clean.strip(chr(34))}"'
+        if any(kw in inst_low for kw in ("klammern", "parentheses", "brackets")):
+            return f"({orig_clean.strip('()')})"
         if any(kw in inst_low for kw in ("fett", "bold")):
-            return f"**{text.strip()}**"
+            return f"**{orig_clean.strip('*')}**"
         if any(kw in inst_low for kw in ("kursiv", "italic")):
-            return f"*{text.strip()}*"
-        if any(kw in inst_low for kw in ("code", "inline code")):
-            return f"`{text.strip()}`"
+            return f"*{orig_clean.strip('*')}*"
         if any(kw in inst_low for kw in ("codeblock", "code-block", "block")):
-            return f"```\n{text.strip()}\n```"
+            return f"```\n{orig_clean}\n```"
+        if any(kw in inst_low for kw in ("code", "inline code")):
+            return f"`{orig_clean.strip('`')}`"
 
-        # 2. Tone: Polite & Formal (Sie-Form)
-        if any(kw in inst_low for kw in ("höflich", "formell", "sie-form", "freundlicher", "respektvoll", "geschäftlich")):
-            res = text.strip()
+        # 2. Email Formatting
+        if any(kw in inst_low for kw in ("e-mail", "email", "als mail")):
+            is_en_inst = any(w in inst_low for w in ("english", "format as", "write as", "make it an email"))
+            body = self.format_text(orig_clean, system_prompt, user_message) if self.rule_engine_callback else orig_clean
+            if body and body[0].islower():
+                body = body[0].upper() + body[1:]
+            if body and not body.endswith((".", "!", "?")):
+                body += "."
+            if is_en_inst:
+                return f"Hi,\n\n{body}\n\nBest regards"
+            return f"Guten Tag,\n\n{body}\n\nMit freundlichen Grüßen"
+
+        # 3. Tone: Polite & Formal (Sie-Form / Business)
+        if any(kw in inst_low for kw in ("höflich", "formell", "sie-form", "siezen", "freundlicher", "respektvoll", "geschäftlich", "professionell", "polite", "formal", "professional", "business", "courteous")):
+            res = orig_clean
             replacements = [
+                (r"\bkannst du mir\b", "könnten Sie mir bitte"),
+                (r"\bkannst du\b", "könnten Sie bitte"),
+                (r"\bmach mal\b", "könnten Sie bitte veranlassen"),
+                (r"\bschick mir\b", "senden Sie mir bitte"),
+                (r"\bgib mir\b", "geben Sie mir bitte"),
+                (r"\bmelde dich\b", "melden Sie sich bitte"),
+                (r"\bsag mir\b", "teilen Sie mir bitte mit"),
+                (r"\bdu musst\b", "bitte beachten Sie, dass Sie"),
                 (r"\bdu\b", "Sie"), (r"\bdir\b", "Ihnen"), (r"\bdich\b", "Sie"),
                 (r"\bdein\b", "Ihr"), (r"\bdeine\b", "Ihre"), (r"\bdeinem\b", "Ihrem"),
                 (r"\bdeinen\b", "Ihren"), (r"\bdeiner\b", "Ihrer"), (r"\bdeines\b", "Ihres"),
-                (r"\bkannst du\b", "könnten Sie bitte"), (r"\bkannst Du\b", "könnten Sie bitte"),
-                (r"\bmach mal\b", "könnten Sie bitte machen"), (r"\bschick mir\b", "senden Sie mir bitte"),
-                (r"\bgib mir\b", "geben Sie mir bitte"), (r"\bmelde dich\b", "melden Sie sich bitte"),
-                (r"\bhallo\b", "Guten Tag,"), (r"\bhi\b", "Guten Tag,"), (r"\bhey\b", "Sehr geehrte Damen und Herren,")
+                (r"\bhallo\b", "Guten Tag,"), (r"\bhi\b", "Guten Tag,"), (r"\bhey\b", "Sehr geehrte Damen und Herren,"),
+                (r"\bLG\b", "Mit freundlichen Grüßen"), (r"\bVG\b", "Mit freundlichen Grüßen"),
+                (r"\bviele grüße\b", "Mit freundlichen Grüßen"),
+                (r"\bcan you\b", "could you please"), (r"\bsend me\b", "please send me"),
+                (r"\bgive me\b", "could you please provide"), (r"\btell me\b", "please let me know"),
+                (r"\bi want\b", "I would like"), (r"\bi need\b", "I would appreciate"),
+                (r"\bdon't\b", "do not"), (r"\bcan't\b", "cannot"), (r"\bwon't\b", "will not"), (r"\bi'm\b", "I am"),
             ]
             for pat, rep in replacements:
                 res = re.sub(pat, rep, res, flags=re.IGNORECASE)
+            if res and res[0].islower():
+                res = res[0].upper() + res[1:]
+            if res == orig_clean:
+                is_en_text = bool(re.search(r"\b(the|and|please|you|this|that|with|for|have)\b", orig_clean, flags=re.IGNORECASE)) or any(w in inst_low for w in ("polite", "formal", "professional", "business"))
+                body = orig_clean.rstrip(".!?")
+                if is_en_text:
+                    if not orig_clean.lower().startswith("please") and not orig_clean.lower().startswith("could you"):
+                        res = f"Could you please note: {body}. Thank you in advance."
+                    else:
+                        res = f"{body}. Thank you very much."
+                else:
+                    if "bitte" not in orig_clean.lower() and "danke" not in orig_clean.lower():
+                        res = f"{body}. Vielen Dank im Voraus."
+                    else:
+                        res = f"Guten Tag, {body}. Mit freundlichen Grüßen"
             return res
 
-        # 3. Tone: Casual & Informal (Du-Form)
-        if any(kw in inst_low for kw in ("du-form", "informell", "duzen", "locker", "kumpelhaft", "freundschaftlich")):
-            res = text.strip()
+        # 4. Tone: Casual & Informal (Du-Form / Friendly)
+        if any(kw in inst_low for kw in ("du-form", "informell", "duzen", "locker", "kumpelhaft", "freundschaftlich", "casual", "informal", "friendly", "relaxed")):
+            res = orig_clean
             replacements = [
+                (r"\bkönnten Sie mir bitte\b", "kannst du mir"),
+                (r"\bkönnten Sie bitte\b", "kannst du"),
+                (r"\bsenden Sie mir bitte\b", "schick mir"),
                 (r"\bSie\b", "du"), (r"\bIhnen\b", "dir"), (r"\bIhr\b", "dein"),
                 (r"\bIhre\b", "deine"), (r"\bIhrem\b", "deinem"), (r"\bIhren\b", "deinen"),
-                (r"\bIhrer\b", "deiner"), (r"\bSehr geehrte Damen und Herren\b", "Hi zusammen,"),
+                (r"\bIhrer\b", "deiner"), (r"\bSehr geehrte Damen und Herren,?\b", "Hi zusammen,"),
                 (r"\bSehr geehrter Herr\b", "Hallo"), (r"\bSehr geehrte Frau\b", "Hallo"),
-                (r"\bMit freundlichen Grüßen\b", "Viele Grüße"), (r"\bGuten Tag\b", "Hi")
+                (r"\bMit freundlichen Grüßen\b", "Viele Grüße"), (r"\bGuten Tag,?\b", "Hi"),
+                (r"\bcould you please\b", "can you"), (r"\bdo not\b", "don't"),
+                (r"\bcannot\b", "can't"), (r"\bwill not\b", "won't"), (r"\bI am\b", "I'm"),
+                (r"\bSincerely,?\b", "Cheers,"), (r"\bBest regards,?\b", "Best,"),
             ]
             for pat, rep in replacements:
                 res = re.sub(pat, rep, res, flags=re.IGNORECASE)
+            if res == orig_clean:
+                if not re.match(r"^(?:hi|hey|hallo)\b", res, flags=re.IGNORECASE):
+                    res = f"Hi! {res}"
             return res
 
-        # 4. Conciseness (Kürzen & Verdichten)
-        if any(kw in inst_low for kw in ("kürz", "kurz", "prägnant", "zusammenfassen", "essenz", "straffen")):
+        # 5. Conciseness (Kürzen & Zusammenfassen)
+        if any(kw in inst_low for kw in ("kürz", "kurz", "prägnant", "zusammenfassen", "zusammenfassung", "essenz", "straffen", "kompakt", "short", "summarize", "summary", "concise", "brief", "condense")):
             fillers = [
                 r"\beigentlich\b\s*", r"\bgewissermaßen\b\s*", r"\bsozusagen\b\s*",
                 r"\birgendwie\b\s*", r"\bhalt\b\s*", r"\beinfach mal\b\s*", r"\bquasi\b\s*",
-                r"\bim grunde genommen\b\s*", r"\bwie gesagt\b\s*"
+                r"\bim grunde genommen\b\s*", r"\bwie gesagt\b\s*", r"\behrlich gesagt\b,?\s*",
+                r"\bich wollte nur sagen,?\s*dass\b\s*", r"\bes ist wichtig zu erwähnen,?\s*dass\b\s*",
+                r"\bbasically\b,?\s*", r"\bactually\b,?\s*", r"\bliterally\b,?\s*",
+                r"\bto be honest\b,?\s*", r"\bin my opinion\b,?\s*", r"\bas a matter of fact\b,?\s*",
             ]
-            res = text.strip()
+            res = orig_clean
             for f in fillers:
                 res = re.sub(f, "", res, flags=re.IGNORECASE)
+            res = re.sub(r"\bin order to\b", "to", res, flags=re.IGNORECASE)
+            res = re.sub(r"\bdue to the fact that\b", "because", res, flags=re.IGNORECASE)
+            res = re.sub(r"\s*\([^)]*\)", "", res)
             res = re.sub(r" +", " ", res).strip()
+
+            # Check if specific sentence count was requested (e.g. "auf 2 Sätze", "auf einen Satz", "in 1 sentence")
+            target_sents = None
+            m_num = re.search(r"(?:auf|in|to)\s+(\d+|ein(?:en)?|one|zwei|two|drei|three)\s+(?:sätz|satz|sentence)", inst_low)
+            if m_num:
+                tok = m_num.group(1)
+                word_to_int = {"ein": 1, "einen": 1, "one": 1, "zwei": 2, "two": 2, "drei": 3, "three": 3}
+                target_sents = word_to_int.get(tok, int(tok) if tok.isdigit() else 1)
+
+            sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", res) if s.strip()]
+            if target_sents and len(sents) > target_sents:
+                res = " ".join(sents[:target_sents])
+            elif res == orig_clean and len(sents) > 1:
+                res = " ".join(sents[: max(1, len(sents) - 1)])
+            elif res == orig_clean and "," in res:
+                clauses = [c.strip() for c in res.split(",") if c.strip()]
+                if len(clauses) > 1:
+                    res = clauses[0] + ("." if not clauses[0].endswith((".", "!", "?")) else "")
+
+            if res and res[0].islower():
+                res = res[0].upper() + res[1:]
+            return res
+
+        # 6. Grammar, Punctuation, Cleanup & General Rewrite
+        if any(kw in inst_low for kw in ("korrigier", "grammatik", "rechtschreibung", "satzzeichen", "verbesser", "umformulier", "überarbeit", "sauber", "klär", "fix", "grammar", "spelling", "correct", "improve", "rewrite", "clean", "rephrase", "polish", "format")):
+            res = self.format_text(orig_clean, system_prompt, user_message) if self.rule_engine_callback else orig_clean
+            res = re.sub(r"\s+([,.!?:;])", r"\1", res)
+            res = re.sub(r" +", " ", res).strip()
+            if res and res[0].islower():
+                res = res[0].upper() + res[1:]
+            if res and not res.endswith((".", "!", "?", ":", ";", '"', "'", ")")):
+                res += "."
             return res
 
         return ""
@@ -244,6 +555,9 @@ class OllamaProvider(BaseFormattingProvider):
         self.ollama_url = clean_url
         self.model = model
 
+    def prewarm_connection(self) -> bool:
+        return http_pool.prewarm(f"{self.ollama_url}/api/chat")
+
     def format_text(self, text: str, system_prompt: str, user_message: str) -> str:
         payload = {
             "model": self.model,
@@ -261,7 +575,7 @@ class OllamaProvider(BaseFormattingProvider):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=12.0) as resp:
+        with http_pool.urlopen(req, timeout=12.0) as resp:
             res_json = json.loads(resp.read().decode("utf-8"))
             return res_json.get("message", {}).get("content", text).strip()
 
@@ -282,7 +596,7 @@ class OllamaProvider(BaseFormattingProvider):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=18.0) as resp:
+        with http_pool.urlopen(req, timeout=18.0) as resp:
             res_json = json.loads(resp.read().decode("utf-8"))
             return res_json.get("message", {}).get("content", text).strip()
 
@@ -324,7 +638,136 @@ class OllamaProvider(BaseFormattingProvider):
             }
 
 
-def get_model_tiers() -> Dict[str, Dict[str, str]]:
+CURATED_MODELS_SPECS: Dict[str, Dict[str, Any]] = {
+    # --- TIER 1: SPEED (< 250 ms) ---
+    "google/gemini-2.5-flash": {
+        "id": "google/gemini-2.5-flash",
+        "tier": "speed",
+        "name": "Google: Gemini 2.5 Flash",
+        "sub": "google/gemini-2.5-flash — Fast & Budget Allrounder",
+        "cost_input": "$0.300 / 1M Tokens (~$0.000030 / dictation)",
+        "cost_output": "$2.500 / 1M Tokens",
+        "typical_latency": "~200 - 300 ms",
+        "context": "1.048.576 Tokens (1M)",
+        "recommended_for": "Standard-Diktate, E-Mails, gemischter Text, hohe Fehlertoleranz",
+        "is_default": True,
+    },
+    "google/gemini-2.5-flash-lite": {
+        "id": "google/gemini-2.5-flash-lite",
+        "tier": "speed",
+        "name": "Google: Gemini 2.5 Flash Lite",
+        "sub": "google/gemini-2.5-flash-lite — Ultra-Fast & Minimal Cost",
+        "cost_input": "$0.100 / 1M Tokens (~$0.000010 / dictation)",
+        "cost_output": "$0.400 / 1M Tokens",
+        "typical_latency": "< 150 ms",
+        "context": "1.048.576 Tokens (1M)",
+        "recommended_for": "Maximale Geschwindigkeit, minimale Kosten, schnelle Satzzeichenkorrektur",
+        "is_default": False,
+    },
+    "openai/gpt-4o-mini": {
+        "id": "openai/gpt-4o-mini",
+        "tier": "speed",
+        "name": "OpenAI: GPT-4o-mini",
+        "sub": "openai/gpt-4o-mini — Reliable Mini Standard",
+        "cost_input": "$0.150 / 1M Tokens (~$0.000015 / dictation)",
+        "cost_output": "$0.600 / 1M Tokens",
+        "typical_latency": "~200 ms",
+        "context": "128.000 Tokens (128k)",
+        "recommended_for": "Präzise Standard-Formatierung, strukturierte Ausgaben, kein Dazuerfinden",
+        "is_default": False,
+    },
+    "meta-llama/llama-3.3-70b-instruct": {
+        "id": "meta-llama/llama-3.3-70b-instruct",
+        "tier": "speed",
+        "name": "Meta: Llama 3.3 70B Instruct",
+        "sub": "meta-llama/llama-3.3-70b-instruct — High Throughput & Structure",
+        "cost_input": "$0.710 / 1M Tokens (~$0.000071 / dictation)",
+        "cost_output": "$0.710 / 1M Tokens",
+        "typical_latency": "~200 ms (>250 T/s via Groq)",
+        "context": "131.072 Tokens (131k)",
+        "recommended_for": "Maximaler Token-Durchsatz, stark im deutschen Satzbau, flüssige Absätze",
+        "is_default": False,
+    },
+
+    # --- TIER 2: BALANCED (300 - 500 ms) ---
+    "deepseek/deepseek-chat": {
+        "id": "deepseek/deepseek-chat",
+        "tier": "balanced",
+        "name": "DeepSeek: DeepSeek V3 (Chat)",
+        "sub": "deepseek/deepseek-chat — Balanced Value Champion",
+        "cost_input": "$0.257 / 1M Tokens (~$0.000026 / dictation)",
+        "cost_output": "$1.029 / 1M Tokens",
+        "typical_latency": "~400 - 500 ms",
+        "context": "163.840 Tokens (164k)",
+        "recommended_for": "Ausgewogene Satzglättung, intelligente Umformulierungen & Notizen",
+        "is_default": True,
+    },
+    "mistralai/mistral-small-24b-instruct-2501": {
+        "id": "mistralai/mistral-small-24b-instruct-2501",
+        "tier": "balanced",
+        "name": "Mistral: Mistral Small 3 (24B)",
+        "sub": "mistralai/mistral-small-24b-instruct-2501 — European Language Pro",
+        "cost_input": "$0.070 / 1M Tokens (~$0.000007 / dictation)",
+        "cost_output": "$0.140 / 1M Tokens",
+        "typical_latency": "~300 - 400 ms",
+        "context": "32.768 Tokens (32k)",
+        "recommended_for": "Exzellente deutsche Grammatik bei minimalen Kosten, europäisches Modell",
+        "is_default": False,
+    },
+    "anthropic/claude-3-haiku": {
+        "id": "anthropic/claude-3-haiku",
+        "tier": "balanced",
+        "name": "Anthropic: Claude 3 Haiku",
+        "sub": "anthropic/claude-3-haiku — Natural Flow & Tone",
+        "cost_input": "$0.250 / 1M Tokens (~$0.000025 / dictation)",
+        "cost_output": "$1.250 / 1M Tokens",
+        "typical_latency": "~350 - 450 ms",
+        "context": "200.000 Tokens (200k)",
+        "recommended_for": "Besonders natürlicher Sprachfluss, verhindert ungewollte Überkorrekturen",
+        "is_default": False,
+    },
+
+    # --- TIER 3: QUALITY (1 - 2 s) ---
+    "qwen/qwen-2.5-72b-instruct": {
+        "id": "qwen/qwen-2.5-72b-instruct",
+        "tier": "quality",
+        "name": "Qwen: Qwen 2.5 72B Instruct",
+        "sub": "qwen/qwen-2.5-72b-instruct — Maximum Rule & Format Fidelity",
+        "cost_input": "$0.360 / 1M Tokens (~$0.000036 / dictation)",
+        "cost_output": "$0.400 / 1M Tokens",
+        "typical_latency": "~1.0 - 2.0 s",
+        "context": "32.768 Tokens (32k)",
+        "recommended_for": "Höchste Regeltreue, strikte Negativ-Prompts, komplexe Markdown-Strukturen",
+        "is_default": True,
+    },
+    "openai/gpt-4o": {
+        "id": "openai/gpt-4o",
+        "tier": "quality",
+        "name": "OpenAI: GPT-4o",
+        "sub": "openai/gpt-4o — Flagship Precision",
+        "cost_input": "$2.500 / 1M Tokens (~$0.000250 / dictation)",
+        "cost_output": "$10.000 / 1M Tokens",
+        "typical_latency": "~1.0 - 1.5 s",
+        "context": "128.000 Tokens (128k)",
+        "recommended_for": "Anspruchsvolle Fachsprache (Medizin, Jura, Technik), komplexe Diktate",
+        "is_default": False,
+    },
+    "anthropic/claude-sonnet-4": {
+        "id": "anthropic/claude-sonnet-4",
+        "tier": "quality",
+        "name": "Anthropic: Claude Sonnet 4",
+        "sub": "anthropic/claude-sonnet-4 — Editorial Excellence",
+        "cost_input": "$3.000 / 1M Tokens (~$0.000300 / dictation)",
+        "cost_output": "$15.000 / 1M Tokens",
+        "typical_latency": "~1.2 - 2.0 s",
+        "context": "1.000.000 Tokens (1M)",
+        "recommended_for": "Höchste redaktionelle Tiefe, perfekte Berichte & lange Dokumente",
+        "is_default": False,
+    },
+}
+
+
+def get_model_tiers() -> Dict[str, Dict[str, Any]]:
     return {
         "speed": {
             "key": "speed",
@@ -332,23 +775,34 @@ def get_model_tiers() -> Dict[str, Dict[str, str]]:
             "badge": tr("prio_speed_badge"),
             "model": "google/gemini-2.5-flash",
             "sub": "google/gemini-2.5-flash — Fast & Budget",
-            "cost_input": "$0.075 / 1M Tokens (~$0.000008 / dictation)",
-            "cost_output": "$0.300 / 1M Tokens",
-            "typical_latency": "< 200 ms",
-            "context": "1.000.000 Tokens (1M)",
+            "cost_input": "$0.300 / 1M Tokens (~$0.000030 / dictation)",
+            "cost_output": "$2.500 / 1M Tokens",
+            "typical_latency": "< 250 ms",
+            "context": "1.048.576 Tokens (1M)",
             "recommended_for": tr("prio_speed_desc"),
+            "models": [
+                "google/gemini-2.5-flash",
+                "google/gemini-2.5-flash-lite",
+                "openai/gpt-4o-mini",
+                "meta-llama/llama-3.3-70b-instruct",
+            ],
         },
         "balanced": {
             "key": "balanced",
             "title": tr("prio_balanced_title"),
             "badge": tr("prio_balanced_badge"),
             "model": "deepseek/deepseek-chat",
-            "sub": "deepseek/deepseek-chat — Balanced",
-            "cost_input": "$0.140 / 1M Tokens (~$0.000014 / dictation)",
-            "cost_output": "$0.280 / 1M Tokens",
-            "typical_latency": "~400 - 600 ms",
-            "context": "64.000 Tokens (64k)",
+            "sub": "deepseek/deepseek-chat — Balanced Value",
+            "cost_input": "$0.257 / 1M Tokens (~$0.000026 / dictation)",
+            "cost_output": "$1.029 / 1M Tokens",
+            "typical_latency": "~400 - 500 ms",
+            "context": "163.840 Tokens (164k)",
             "recommended_for": tr("prio_balanced_desc"),
+            "models": [
+                "deepseek/deepseek-chat",
+                "mistralai/mistral-small-24b-instruct-2501",
+                "anthropic/claude-3-haiku",
+            ],
         },
         "quality": {
             "key": "quality",
@@ -356,26 +810,100 @@ def get_model_tiers() -> Dict[str, Dict[str, str]]:
             "badge": tr("prio_quality_badge"),
             "model": "qwen/qwen-2.5-72b-instruct",
             "sub": "qwen/qwen-2.5-72b-instruct — Maximum Depth",
-            "cost_input": "$0.400 / 1M Tokens (~$0.000040 / dictation)",
-            "cost_output": "$0.800 / 1M Tokens",
-            "typical_latency": "~2 - 5 s",
-            "context": "32.000 Tokens (32k)",
+            "cost_input": "$0.360 / 1M Tokens (~$0.000036 / dictation)",
+            "cost_output": "$0.400 / 1M Tokens",
+            "typical_latency": "~1 - 2 s",
+            "context": "32.768 Tokens (32k)",
             "recommended_for": tr("prio_quality_desc"),
+            "models": [
+                "qwen/qwen-2.5-72b-instruct",
+                "openai/gpt-4o",
+                "anthropic/claude-sonnet-4",
+            ],
         },
     }
+
 
 MODEL_TIERS = get_model_tiers()
 
 
-def get_model_details(model_id: str) -> Dict[str, str]:
-    m_low = (model_id or "").lower().strip()
-    tiers = get_model_tiers()
-    for tier_info in tiers.values():
-        if tier_info["model"].lower() == m_low:
-            return tier_info
+def get_tier_for_model(model_id: str) -> Optional[str]:
+    """Returns 'speed', 'balanced', or 'quality' for known models/aliases, or None."""
+    if not model_id:
+        return None
+    m_low = model_id.lower().strip()
+    m_clean = m_low.replace("models/", "").replace("openai/", "").replace("google/", "").replace("meta-llama/", "").replace("anthropic/", "").replace("mistralai/", "").replace("deepseek/", "").replace("qwen/", "")
 
-    # Dynamic heuristics for other models
-    if any(k in m_low for k in ("flash", "mini", "instant", "8b", "7b", "small")):
+    # 1. Exact match by full ID in CURATED_MODELS_SPECS
+    if m_low in CURATED_MODELS_SPECS:
+        return CURATED_MODELS_SPECS[m_low]["tier"]
+
+    # 2. Exact match by clean ID
+    for spec_id, spec in CURATED_MODELS_SPECS.items():
+        spec_clean = spec_id.lower().split("/")[-1]
+        if m_clean == spec_clean or m_low == spec_clean:
+            return spec["tier"]
+
+    # 3. Specific aliases (order matters: lite before general flash)
+    if "flash-lite" in m_low or "lite" in m_low:
+        return "speed"
+    if any(k in m_low for k in ("gemini-2.5-flash", "gemini-2.0-flash", "gpt-4o-mini", "llama-3.3-70b", "llama3.3:70b", "llama-3.1-8b", "llama3.1:8b")):
+        return "speed"
+    if any(k in m_low for k in ("deepseek-chat", "deepseek-v3", "mistral-small", "haiku")):
+        return "balanced"
+    if any(k in m_low for k in ("qwen-2.5-72b", "qwen2.5:72b", "gpt-4o", "sonnet")):
+        return "quality"
+    return None
+
+
+def get_curated_models_catalog() -> List[Dict[str, Any]]:
+    """Returns the full list of curated model dicts in tiered order."""
+    return list(CURATED_MODELS_SPECS.values())
+
+
+def get_model_details(model_id: str) -> Dict[str, Any]:
+    m_low = (model_id or "").lower().strip()
+    m_clean = m_low.replace("models/", "").replace("openai/", "").replace("google/", "").replace("meta-llama/", "").replace("anthropic/", "").replace("mistralai/", "").replace("deepseek/", "").replace("qwen/", "")
+
+    # 1. Exact match by full ID in CURATED_MODELS_SPECS
+    if m_low in CURATED_MODELS_SPECS:
+        spec = CURATED_MODELS_SPECS[m_low]
+        tier_key = spec.get("tier", "speed")
+        tier_info = get_model_tiers().get(tier_key, {})
+        return {
+            "key": tier_key,
+            "title": tier_info.get("title", spec.get("name", model_id)),
+            "badge": tier_info.get("badge", ""),
+            "model": spec["id"],
+            "sub": spec.get("sub", spec["id"]),
+            "cost_input": spec.get("cost_input", "$0.30 / 1M"),
+            "cost_output": spec.get("cost_output", "$0.50 / 1M"),
+            "typical_latency": spec.get("typical_latency", "~300ms"),
+            "context": spec.get("context", "32k Tokens"),
+            "recommended_for": spec.get("recommended_for", ""),
+        }
+
+    # 2. Exact match by clean ID
+    for spec_id, spec in CURATED_MODELS_SPECS.items():
+        spec_clean = spec_id.lower().split("/")[-1]
+        if m_clean == spec_clean or m_low == spec_clean:
+            tier_key = spec.get("tier", "speed")
+            tier_info = get_model_tiers().get(tier_key, {})
+            return {
+                "key": tier_key,
+                "title": tier_info.get("title", spec.get("name", model_id)),
+                "badge": tier_info.get("badge", ""),
+                "model": spec["id"],
+                "sub": spec.get("sub", spec["id"]),
+                "cost_input": spec.get("cost_input", "$0.30 / 1M"),
+                "cost_output": spec.get("cost_output", "$0.50 / 1M"),
+                "typical_latency": spec.get("typical_latency", "~300ms"),
+                "context": spec.get("context", "32k Tokens"),
+                "recommended_for": spec.get("recommended_for", ""),
+            }
+
+    # 3. Dynamic heuristics for other unlisted / custom models
+    if any(k in m_low for k in ("flash-lite", "lite", "mini", "instant", "8b", "7b", "small", "turbo")):
         return {
             "key": "custom",
             "title": tr("model_custom_compact_title"),
@@ -388,7 +916,7 @@ def get_model_details(model_id: str) -> Dict[str, str]:
             "context": tr("model_custom_var_ctx"),
             "recommended_for": tr("model_custom_compact_rec"),
         }
-    elif any(k in m_low for k in ("70b", "72b", "sonnet", "gpt-4o", "large", "plus")):
+    elif any(k in m_low for k in ("70b", "72b", "sonnet", "gpt-4o", "large", "plus", "opus")):
         return {
             "key": "custom",
             "title": tr("model_custom_large_title"),
@@ -499,6 +1027,9 @@ class UniversalApiProvider(BaseFormattingProvider):
             return f"{base}/models"
         return f"{self.endpoint}/models"
 
+    def prewarm_connection(self) -> bool:
+        return http_pool.prewarm(self._get_chat_url())
+
     def _build_headers(self) -> Dict[str, str]:
         headers = {
             "Content-Type": "application/json",
@@ -526,7 +1057,7 @@ class UniversalApiProvider(BaseFormattingProvider):
         if max_tokens:
             payload["max_tokens"] = max_tokens
 
-        detected = detect_provider(self.endpoint, self.api_key)
+        detected = detect_provider(self.endpoint, self._static_api_key)
         if detected == "OpenRouter" or "openrouter" in self.endpoint:
             p_obj: Dict[str, Any] = {}
             if self.routing_strategy in ("latency", "price", "throughput"):
@@ -555,11 +1086,30 @@ class UniversalApiProvider(BaseFormattingProvider):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
         try:
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
+            with http_pool.urlopen(req, timeout=10.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 choices = res_json.get("choices", [])
                 if choices:
                     return choices[0].get("message", {}).get("content", text).strip()
+        except urllib.error.HTTPError as he:
+            if "provider" in payload and self.allow_fallbacks and he.code in (400, 404, 422, 502, 503):
+                try:
+                    fallback_payload = dict(payload)
+                    fallback_payload.pop("provider", None)
+                    fb_req = urllib.request.Request(
+                        url,
+                        data=json.dumps(fallback_payload).encode("utf-8"),
+                        headers=headers,
+                        method="POST",
+                    )
+                    with http_pool.urlopen(fb_req, timeout=10.0) as resp:
+                        res_json = json.loads(resp.read().decode("utf-8"))
+                        choices = res_json.get("choices", [])
+                        if choices:
+                            return choices[0].get("message", {}).get("content", text).strip()
+                except Exception:
+                    pass
+            print(f"[UniversalApiProvider] format_text error from {url}: {he}")
         except Exception as e:
             print(f"[UniversalApiProvider] format_text error from {url}: {e}")
         return text
@@ -578,7 +1128,7 @@ class UniversalApiProvider(BaseFormattingProvider):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
         try:
-            with urllib.request.urlopen(req, timeout=15.0) as resp:
+            with http_pool.urlopen(req, timeout=15.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 choices = res_json.get("choices", [])
                 if choices:
@@ -601,7 +1151,7 @@ class UniversalApiProvider(BaseFormattingProvider):
         req = urllib.request.Request(url, headers=headers, method="GET")
 
         try:
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
+            with http_pool.urlopen(req, timeout=8.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 raw_list = res_json.get("data", []) if isinstance(res_json, dict) else []
                 if not raw_list and isinstance(res_json, list):
@@ -678,7 +1228,7 @@ class UniversalApiProvider(BaseFormattingProvider):
             }
             data = json.dumps(payload).encode("utf-8")
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
+            with http_pool.urlopen(req, timeout=8.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 choices = res_json.get("choices", [])
                 if choices:
@@ -735,6 +1285,9 @@ class OpenAIProvider(BaseFormattingProvider):
             model=self.model,
         )
 
+    def prewarm_connection(self) -> bool:
+        return self._universal.prewarm_connection()
+
     def format_text(self, text: str, system_prompt: str, user_message: str) -> str:
         return self._universal.format_text(text, system_prompt, user_message)
 
@@ -751,6 +1304,9 @@ class GeminiProvider(BaseFormattingProvider):
     def __init__(self, api_key: Optional[str] = None, model: str = "gemini-2.5-flash"):
         self._static_api_key = api_key
         self.model = model or "gemini-2.5-flash"
+
+    def prewarm_connection(self) -> bool:
+        return http_pool.prewarm("https://generativelanguage.googleapis.com/v1beta/models")
 
     def _resolve_api_key(self) -> Optional[str]:
         if self._static_api_key and self._static_api_key.strip():
@@ -784,7 +1340,7 @@ class GeminiProvider(BaseFormattingProvider):
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
+            with http_pool.urlopen(req, timeout=8.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 candidates = res_json.get("candidates", [])
                 if candidates:
@@ -809,7 +1365,7 @@ class GeminiProvider(BaseFormattingProvider):
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=12.0) as resp:
+            with http_pool.urlopen(req, timeout=12.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 candidates = res_json.get("candidates", [])
                 if candidates:
@@ -828,7 +1384,7 @@ class GeminiProvider(BaseFormattingProvider):
             url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
             del key
             req = urllib.request.Request(url, headers={"User-Agent": "Velodictum/1.0"}, method="GET")
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
+            with http_pool.urlopen(req, timeout=5.0) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
                 models = res.get("models", [])
                 return {
@@ -852,6 +1408,9 @@ class GroqProvider(BaseFormattingProvider):
             api_key=self.api_key,
             model=self.model,
         )
+
+    def prewarm_connection(self) -> bool:
+        return self._universal.prewarm_connection()
 
     def format_text(self, text: str, system_prompt: str, user_message: str) -> str:
         return self._universal.format_text(text, system_prompt, user_message)

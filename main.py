@@ -223,6 +223,28 @@ class VelodictumCoreApp:
         signals.mobile_bridge_toggled.connect(self._on_mobile_bridge_toggled)
 
         self._proc_lock = threading.Lock()
+        self._chunk_lock = threading.Lock()
+        self._prefetch_event = threading.Event()
+        self._prefetched_win_ctx = None
+        self._streamed_chunks = []
+        self._streamed_duration = 0.0
+        self._streamed_latency = 0.0
+        self._streamed_lang = "de"
+        self._streamed_prob = 1.0
+        self._recording_session_id = 0
+
+    def _sync_formatter_config(self):
+        """Synchronize AIFormatter runtime attributes with current config."""
+        self.formatter.mode = self.config.formatting.mode
+        self.formatter.engine = self.config.formatting.engine
+        self.formatter.api_endpoint = getattr(self.config.formatting, "api_endpoint", "https://openrouter.ai/api/v1")
+        self.formatter.api_key = self.config.formatting.api_key
+        self.formatter.model = getattr(self.config.formatting, "model", "qwen/qwen-2.5-72b-instruct")
+        self.formatter.ollama_url = self.config.formatting.ollama_url
+        self.formatter.ollama_model = self.config.formatting.ollama_model
+        self.formatter.openrouter_model = self.formatter.model
+        self.formatter.tone = getattr(self.config.formatting, "tone", "default")
+        self.formatter.custom_instructions = getattr(self.config.formatting, "custom_instructions", "")
 
     def _on_mobile_bridge_toggled(self, enabled: bool):
         if enabled:
@@ -242,6 +264,12 @@ class VelodictumCoreApp:
     def cancel_recording(self):
         """Cancel active recording immediately, discard audio data and notify UI."""
         with self._proc_lock:
+            self._recording_session_id += 1
+            with self._chunk_lock:
+                self._streamed_chunks.clear()
+                self._streamed_duration = 0.0
+                self._streamed_latency = 0.0
+
             if not self.recorder.is_recording and not self.is_voice_editing:
                 # Also reset hotkey state just in case it was left active
                 self.hotkey.reset_all_states()
@@ -392,8 +420,13 @@ class VelodictumCoreApp:
                 return
 
             self.is_voice_editing = True
-            # 1. Grab selected text from foreground window
-            self._edit_original_text = grab_selected_text_win32()
+            # 1. Grab selected text from foreground window (suppress synthetic Ctrl+C key events in HotkeyManager)
+            self.hotkey.suppress_events = True
+            try:
+                self._edit_original_text = grab_selected_text_win32()
+            finally:
+                self.hotkey.suppress_events = False
+
             if not self._edit_original_text or not self._edit_original_text.strip():
                 signals.transcription_failed.emit(tr("hud_no_text_selected"))
                 self.is_voice_editing = False
@@ -414,6 +447,14 @@ class VelodictumCoreApp:
             started = self.recorder.start()
             if started:
                 signals.voice_edit_started.emit()
+                def _prewarm_edit():
+                    try:
+                        self._sync_formatter_config()
+                        self.formatter.prewarm_connection()
+                        self.stt.prewarm_connection()
+                    except Exception:
+                        pass
+                threading.Thread(target=_prewarm_edit, daemon=True).start()
 
     def on_stop_voice_edit(self):
         """Stop voice edit recording and process transformation."""
@@ -421,6 +462,7 @@ class VelodictumCoreApp:
             if not self.recorder.is_recording or self.is_processing:
                 return
             self.is_processing = True
+            self.hotkey.set_binding_active("voice_edit", False)
             if getattr(config.audio, "auto_ducking", True):
                 from audio_ducker import audio_ducker
                 audio_ducker.unduck()
@@ -453,7 +495,8 @@ class VelodictumCoreApp:
                 return
 
             signals.formatting_started.emit()
-            # Transform text via LLM
+            self._sync_formatter_config()
+            # Transform text via LLM or local rules
             transformed = self.voice_editor.transform_text(
                 original_text=original_text,
                 instruction=instruction,
@@ -461,7 +504,11 @@ class VelodictumCoreApp:
             )
 
             if transformed and transformed.strip():
-                self.injector.inject(transformed.strip(), raw_text=instruction)
+                self.hotkey.suppress_events = True
+                try:
+                    self.injector.inject(transformed.strip(), raw_text=instruction)
+                finally:
+                    self.hotkey.suppress_events = False
                 payload = {
                     "text": transformed.strip(),
                     "instruction": instruction,
@@ -472,7 +519,7 @@ class VelodictumCoreApp:
                 }
                 signals.voice_edit_completed.emit(payload)
             else:
-                signals.transcription_failed.emit("Transformation not possible" if get_current_language() == "en" else "Transformation nicht möglich")
+                signals.transcription_failed.emit(tr("hud_transform_not_possible"))
         except Exception as e:
             signals.transcription_failed.emit(str(e))
         finally:
@@ -497,6 +544,17 @@ class VelodictumCoreApp:
                 self.hotkey.reset_all_states()
                 return
 
+            self._recording_session_id += 1
+            session_id = self._recording_session_id
+            self._prefetched_win_ctx = None
+            self._prefetch_event.clear()
+            with self._chunk_lock:
+                self._streamed_chunks.clear()
+                self._streamed_duration = 0.0
+                self._streamed_latency = 0.0
+                self._streamed_lang = "de"
+                self._streamed_prob = 1.0
+
             self._play_cue(start=True)
             if getattr(config.audio, "auto_ducking", True):
                 def _duck_async():
@@ -511,12 +569,88 @@ class VelodictumCoreApp:
             started = self.recorder.start()
             if started:
                 signals.recording_started.emit()
+                threading.Thread(
+                    target=self._async_recording_prep,
+                    args=(session_id,),
+                    daemon=True,
+                ).start()
+
+    def _async_recording_prep(self, session_id: int):
+        """
+        Parallel background worker during active recording:
+        1. Pre-warms HTTP/TLS Keep-Alive sockets for LLM & Cloud STT providers (0ms handshake on stop).
+        2. Prefetches Win32/UIA deep window context & seeds workspace vocabulary (0ms UIA IPC on stop).
+        3. Incrementally slices and transcribes completed speech chunks during natural speech pauses.
+        """
+        try:
+            self._sync_formatter_config()
+            threading.Thread(target=self.formatter.prewarm_connection, daemon=True).start()
+            threading.Thread(target=self.stt.prewarm_connection, daemon=True).start()
+        except Exception:
+            pass
+
+        try:
+            win_ctx = get_active_window_context(include_deep_text=True)
+            if self._recording_session_id == session_id:
+                self._prefetched_win_ctx = win_ctx
+                ws_terms = [
+                    win_ctx.get("workspace_project", ""),
+                    win_ctx.get("workspace_file", ""),
+                    win_ctx.get("git_branch", ""),
+                ]
+                from custom_vocabulary import vocab_manager
+                vocab_manager.set_transient_workspace_terms([t for t in ws_terms if t])
+        except Exception:
+            pass
+        finally:
+            self._prefetch_event.set()
+
+        # Incremental pause-based background chunk transcription (disabled by default to preserve full Whisper context)
+        if not getattr(self.config.whisper, "streaming_chunks", False):
+            return
+
+        is_translate = getattr(self.config.translation, "enabled", False) or self.config.formatting.mode == "translate"
+        stt_task = "translate" if (is_translate and getattr(self.config.translation, "target_language", "en") == "en") else "transcribe"
+
+        while self.recorder.is_recording and self._recording_session_id == session_id:
+            time.sleep(0.25)
+            if not self.recorder.is_recording or self._recording_session_id != session_id:
+                break
+            try:
+                chunk = self.recorder.pop_completed_chunk_on_silence(
+                    min_speech_sec=6.0,
+                    silence_sec=1.20,
+                    silence_rms=0.005,
+                )
+                if chunk is not None and len(chunk) > 0:
+                    with self._chunk_lock:
+                        if self._recording_session_id != session_id:
+                            break
+                        res = self.stt.transcribe(
+                            chunk,
+                            sample_rate=self.config.audio.sample_rate,
+                            task=stt_task,
+                        )
+                        if self._recording_session_id != session_id:
+                            break
+                        c_text = res.get("text", "").strip()
+                        if c_text:
+                            self._streamed_chunks.append(c_text)
+                            self._streamed_duration += res.get("duration", 0.0)
+                            self._streamed_latency += res.get("latency", 0.0)
+                            if res.get("language"):
+                                self._streamed_lang = res["language"]
+                            if res.get("language_prob"):
+                                self._streamed_prob = res["language_prob"]
+            except Exception:
+                pass
 
     def on_stop_recording(self):
         with self._proc_lock:
             if not self.recorder.is_recording or self.is_processing:
                 return
             self.is_processing = True
+            self.hotkey.set_binding_active(self.hotkey.primary_name, False)
             if getattr(config.audio, "auto_ducking", True):
                 from audio_ducker import audio_ducker
                 audio_ducker.unduck()
@@ -532,7 +666,20 @@ class VelodictumCoreApp:
     def _process_audio_worker(self, audio_data):
         signals.transcription_started.emit()
         try:
-            if len(audio_data) < int(self.config.audio.sample_rate * self.config.audio.min_audio_length_sec):
+            import numpy as np
+
+            # Wait for any in-flight background chunk transcription to finish
+            with self._chunk_lock:
+                pre_chunks = list(self._streamed_chunks)
+                pre_dur = self._streamed_duration
+                pre_lang = self._streamed_lang
+                pre_prob = self._streamed_prob
+                self._streamed_chunks.clear()
+                self._streamed_duration = 0.0
+                self._streamed_latency = 0.0
+
+            min_samples = int(self.config.audio.sample_rate * self.config.audio.min_audio_length_sec)
+            if not pre_chunks and len(audio_data) < min_samples:
                 signals.transcription_failed.emit(tr("hud_too_short"))
                 return
 
@@ -540,19 +687,50 @@ class VelodictumCoreApp:
             is_translate = getattr(self.config.translation, "enabled", False) or self.config.formatting.mode == "translate"
             stt_task = "translate" if (is_translate and getattr(self.config.translation, "target_language", "en") == "en") else "transcribe"
 
-            # Dynamic Workspace Seeding (VS Code project, open file, git branch)
-            win_ctx_initial = get_active_window_context(include_deep_text=False)
-            ws_terms = [
-                win_ctx_initial.get("workspace_project", ""),
-                win_ctx_initial.get("workspace_file", ""),
-                win_ctx_initial.get("git_branch", ""),
-            ]
-            from custom_vocabulary import vocab_manager
-            vocab_manager.set_transient_workspace_terms([t for t in ws_terms if t])
+            # Retrieve prefetched window context (or fetch now if _process_audio_worker was invoked directly)
+            self._prefetch_event.wait(timeout=0.25)
+            win_ctx = self._prefetched_win_ctx
+            self._prefetched_win_ctx = None
+            if win_ctx is None:
+                win_ctx = get_active_window_context(include_deep_text=True)
+                ws_terms = [
+                    win_ctx.get("workspace_project", ""),
+                    win_ctx.get("workspace_file", ""),
+                    win_ctx.get("git_branch", ""),
+                ]
+                from custom_vocabulary import vocab_manager
+                vocab_manager.set_transient_workspace_terms([t for t in ws_terms if t])
+            else:
+                from custom_vocabulary import vocab_manager
 
-            # 1. Transcribe with Whisper (Local GPU/CPU or Cloud Provider)
-            result = self.stt.transcribe(audio_data, sample_rate=self.config.audio.sample_rate, task=stt_task)
-            raw_text = result["text"]
+            # 1. Transcribe with Whisper
+            if pre_chunks:
+                tail_min_samples = int(self.config.audio.sample_rate * 0.20)
+                if len(audio_data) >= tail_min_samples:
+                    tail_res = self.stt.transcribe(audio_data, sample_rate=self.config.audio.sample_rate, task=stt_task)
+                    tail_text = tail_res.get("text", "").strip()
+                    combined_parts = pre_chunks + ([tail_text] if tail_text else [])
+                    raw_text = " ".join(combined_parts).strip()
+                    result = {
+                        "text": raw_text,
+                        "language": tail_res.get("language") or pre_lang,
+                        "language_prob": tail_res.get("language_prob") or pre_prob,
+                        "duration": round(pre_dur + tail_res.get("duration", 0.0), 2),
+                        "latency": tail_res.get("latency", 0.0),
+                    }
+                else:
+                    raw_text = " ".join(pre_chunks).strip()
+                    tail_dur = len(audio_data) / float(self.config.audio.sample_rate) if len(audio_data) > 0 else 0.0
+                    result = {
+                        "text": raw_text,
+                        "language": pre_lang,
+                        "language_prob": pre_prob,
+                        "duration": round(pre_dur + tail_dur, 2),
+                        "latency": 0.0,
+                    }
+            else:
+                result = self.stt.transcribe(audio_data, sample_rate=self.config.audio.sample_rate, task=stt_task)
+                raw_text = result["text"]
 
             if not raw_text.strip():
                 signals.transcription_failed.emit(tr("hud_no_speech"))
@@ -560,19 +738,7 @@ class VelodictumCoreApp:
 
             # 2. Apply AI Post-Processing & The Flow Layer
             signals.formatting_started.emit()
-            win_ctx = get_active_window_context(include_deep_text=True)
-            
-            # Sync engine, model, API key, tone and custom instructions with current config
-            self.formatter.mode = self.config.formatting.mode
-            self.formatter.engine = self.config.formatting.engine
-            self.formatter.api_endpoint = getattr(self.config.formatting, "api_endpoint", "https://openrouter.ai/api/v1")
-            self.formatter.api_key = self.config.formatting.api_key
-            self.formatter.model = getattr(self.config.formatting, "model", "qwen/qwen-2.5-72b-instruct")
-            self.formatter.ollama_url = self.config.formatting.ollama_url
-            self.formatter.ollama_model = self.config.formatting.ollama_model
-            self.formatter.openrouter_model = self.formatter.model
-            self.formatter.tone = getattr(self.config.formatting, "tone", "default")
-            self.formatter.custom_instructions = getattr(self.config.formatting, "custom_instructions", "")
+            self._sync_formatter_config()
 
             fmt_result = self.formatter.format_text(
                 raw_text,
@@ -609,7 +775,7 @@ class VelodictumCoreApp:
             except Exception:
                 pass
 
-            # Total latency = Whisper latency + AI formatting latency
+            # Total post-stop latency = post-stop Whisper latency + AI formatting latency
             total_latency = result["latency"] + fmt_result.get("latency", 0.0)
 
             # Emit completion event to update HUD, Dashboard, and History
@@ -690,7 +856,7 @@ def main():
     core.start_background_workers()
 
     # 3. Create Windows & UI Elements
-    dashboard = DashboardWindow(core.recorder, core.stt, core.formatter)
+    dashboard = DashboardWindow(core.recorder, core.stt, core.formatter, injector=core.injector)
     scratchpad = ScratchpadWindow(core.formatter)
     hud = FloatingHUD()
     tray = VelodictumTrayIcon(dashboard)

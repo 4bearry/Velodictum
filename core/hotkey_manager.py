@@ -26,6 +26,7 @@ class HotkeyBinding:
         self.on_release = on_release
         self.mode = mode
         self.is_active = False
+        self.combo_held = False
         self.last_trigger_time = 0.0
 
 
@@ -43,6 +44,7 @@ class HotkeyManager:
         self._bindings: Dict[str, HotkeyBinding] = {}
         self._lock = threading.Lock()
         self.on_cancel = on_cancel
+        self.suppress_events = False
 
         # Primary dictation binding (backward-compatible)
         self.primary_name = "primary_dictate"
@@ -124,12 +126,21 @@ class HotkeyManager:
         with self._lock:
             self._bindings.pop(name, None)
 
+    def set_binding_active(self, name: str, active: bool):
+        """Explicitly synchronize active state for a named binding."""
+        with self._lock:
+            if name in self._bindings:
+                self._bindings[name].is_active = active
+                if not active:
+                    self._bindings[name].combo_held = False
+
     def reset_all_states(self):
         """Reset active state and pressed keys on all registered bindings."""
         with self._lock:
             self._pressed_keys.clear()
             for b in self._bindings.values():
                 b.is_active = False
+                b.combo_held = False
 
     def set_hotkey(self, hotkey_str: str):
         """Update primary dictation hotkey combination on the fly."""
@@ -139,6 +150,7 @@ class HotkeyManager:
                 b.combo_str = hotkey_str.lower().strip()
                 b.target_keys = self.parse_combo(b.combo_str)
                 b.is_active = False
+                b.combo_held = False
 
     def set_hotkey_combo(self, name: str, hotkey_str: str):
         """Update a specific named hotkey combination on the fly."""
@@ -148,6 +160,7 @@ class HotkeyManager:
                 b.combo_str = hotkey_str.lower().strip()
                 b.target_keys = self.parse_combo(b.combo_str)
                 b.is_active = False
+                b.combo_held = False
 
     @staticmethod
     def parse_combo(combo_str: str) -> List[str]:
@@ -220,6 +233,9 @@ class HotkeyManager:
         return all(k in self._pressed_keys for k in target_keys)
 
     def _on_press(self, key):
+        if self.suppress_events:
+            return
+
         canonical = self.canonical_key_name(key)
 
         # Immediate Escape key cancellation
@@ -233,14 +249,16 @@ class HotkeyManager:
             for binding in list(self._bindings.values()):
                 if self._is_combo_match(binding.target_keys):
                     if binding.mode == "push_to_talk":
-                        if not binding.is_active or (now - binding.last_trigger_time > 0.12):
+                        if not binding.is_active and (now - binding.last_trigger_time > 0.12):
                             binding.is_active = True
+                            binding.combo_held = True
                             binding.last_trigger_time = now
                             if binding.on_press:
                                 threading.Thread(target=binding.on_press, daemon=True).start()
 
                     elif binding.mode == "toggle":
-                        if now - binding.last_trigger_time > 0.15:
+                        if not binding.combo_held and (now - binding.last_trigger_time > 0.18):
+                            binding.combo_held = True
                             binding.last_trigger_time = now
                             if not binding.is_active:
                                 binding.is_active = True
@@ -254,11 +272,15 @@ class HotkeyManager:
                     elif binding.mode == "press_once":
                         if not binding.is_active or (now - binding.last_trigger_time > 0.18):
                             binding.is_active = True
+                            binding.combo_held = True
                             binding.last_trigger_time = now
                             if binding.on_press:
                                 threading.Thread(target=binding.on_press, daemon=True).start()
 
     def _on_release(self, key):
+        if self.suppress_events:
+            return
+
         canonical = self.canonical_key_name(key)
         with self._lock:
             self._pressed_keys.discard(canonical)
@@ -266,6 +288,7 @@ class HotkeyManager:
 
             for binding in list(self._bindings.values()):
                 if not self._is_combo_match(binding.target_keys):
+                    binding.combo_held = False
                     if binding.mode == "push_to_talk":
                         if binding.is_active:
                             binding.is_active = False

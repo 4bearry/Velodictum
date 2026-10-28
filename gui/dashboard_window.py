@@ -6,26 +6,28 @@ seamless surface blends (no harsh black boxes), and quiet typography.
 """
 import math
 import os
+import re
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF, QSize, pyqtSignal, QUrl
 from PyQt6.QtGui import (
-    QFont, QColor, QPainter, QBrush, QPen, QLinearGradient,
-    QKeyEvent, QDesktopServices
+    QFont, QColor, QPainter, QBrush, QPen, QLinearGradient, QRadialGradient,
+    QKeyEvent, QDesktopServices, QPixmap, QIcon, QPainterPath, QAction
 )
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame,
     QPushButton, QTabWidget, QComboBox, QCheckBox, QLineEdit,
     QApplication, QGridLayout, QScrollArea, QSizePolicy, QDialog, QStackedWidget,
-    QSlider
+    QSlider, QMenu, QFileDialog
 )
 import pyperclip
 
 from config import config, PROFILES
 from gui.assets import create_app_icon
 from gui.signals import signals
+from text_injector import safe_clipboard_copy, safe_clipboard_paste
 from audio_recorder import AudioRecorder
 from gpu_monitor import GPUMonitor
 from ai_formatter import MODES
@@ -47,20 +49,490 @@ from formatting_providers import (
     GeminiProvider,
     GroqProvider,
     MODEL_TIERS,
+    CURATED_MODELS_SPECS,
+    get_tier_for_model,
+    get_curated_models_catalog,
     get_model_details,
 )
-from gui.theme import get_stylesheet, apply_window_backdrop
+from gui.theme import (
+    get_stylesheet,
+    apply_window_backdrop,
+    ThemeColors,
+    ThemeTypography,
+    ThemeMetrics,
+    get_sunken_qss,
+    get_keycap_qss,
+    is_reduced_motion,
+    apply_neomorphic_shadow,
+)
 from i18n import tr, set_current_language, get_current_language
 
 
 # =========================================================================
-# 1. Custom Interactive Preset Cards (Zero Layout-Squashing / No Clipping)
+# 1. Custom Interactive Preset Cards & Neomorphic Studio Widgets
 # =========================================================================
+
+def _create_brand_wave_pixmap(size: int = 28) -> QPixmap:
+    """Renders the 5-bar indigo/violet soundwave brand mark matching the Dark Neomorphism 2.0 target design."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    w = float(size)
+    h = float(size)
+    cy = h / 2.0
+    heights = [0.16, 0.45, 0.86, 0.35, 0.65, 0.16]
+    bar_w = 2.6
+    gap = 2.1
+    total_w = len(heights) * bar_w + (len(heights) - 1) * gap
+    start_x = (w - total_w) / 2.0
+
+    for idx, rel_h in enumerate(heights):
+        bh = max(2.8, rel_h * h)
+        bx = start_x + idx * (bar_w + gap)
+        by = cy - bh / 2.0
+        grad = QLinearGradient(bx, by, bx, by + bh)
+        grad.setColorAt(0.0, QColor("#60a5fa"))
+        grad.setColorAt(0.5, QColor("#6366f1"))
+        grad.setColorAt(1.0, QColor("#8b5cf6"))
+        painter.setBrush(QBrush(grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
+
+    painter.end()
+    return pix
+
+
+def _create_sidebar_icon(kind: str, color_hex: str, size: int = 18) -> QIcon:
+    """Renders crisp vector navigation icons (studio, dictations, profiles, settings) for the fixed left sidebar."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    col = QColor(color_hex)
+    pen = QPen(col, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    s = float(size)
+    if kind == "studio":
+        # Filled/outlined house icon matching target design
+        path = QPainterPath()
+        path.moveTo(s * 0.15, s * 0.48)
+        path.lineTo(s * 0.50, s * 0.16)
+        path.lineTo(s * 0.85, s * 0.48)
+        path.lineTo(s * 0.78, s * 0.48)
+        path.lineTo(s * 0.78, s * 0.84)
+        path.lineTo(s * 0.58, s * 0.84)
+        path.lineTo(s * 0.58, s * 0.60)
+        path.lineTo(s * 0.42, s * 0.60)
+        path.lineTo(s * 0.42, s * 0.84)
+        path.lineTo(s * 0.22, s * 0.84)
+        path.lineTo(s * 0.22, s * 0.48)
+        path.closeSubpath()
+        if color_hex.lower() == "#ffffff":
+            painter.setBrush(QBrush(col))
+        painter.drawPath(path)
+    elif kind == "dictations":
+        # Rounded document sheet with horizontal lines
+        doc_rect = QRectF(s * 0.22, s * 0.14, s * 0.56, s * 0.72)
+        painter.drawRoundedRect(doc_rect, 2.5, 2.5)
+        painter.drawLine(QPointF(s * 0.34, s * 0.36), QPointF(s * 0.66, s * 0.36))
+        painter.drawLine(QPointF(s * 0.34, s * 0.52), QPointF(s * 0.66, s * 0.52))
+        painter.drawLine(QPointF(s * 0.34, s * 0.68), QPointF(s * 0.54, s * 0.68))
+    elif kind == "profiles":
+        # User head & shoulders outline
+        painter.drawEllipse(QPointF(s * 0.50, s * 0.33), s * 0.17, s * 0.17)
+        arc_rect = QRectF(s * 0.20, s * 0.55, s * 0.60, s * 0.42)
+        painter.drawArc(arc_rect, 0 * 16, 180 * 16)
+        painter.drawLine(QPointF(s * 0.20, s * 0.76), QPointF(s * 0.80, s * 0.76))
+    elif kind == "settings":
+        # Crisp gear / cogwheel icon
+        cx, cy = s * 0.50, s * 0.50
+        painter.drawEllipse(QPointF(cx, cy), s * 0.15, s * 0.15)
+        outer_r = s * 0.36
+        inner_r = s * 0.27
+        for i in range(8):
+            ang = i * (math.pi / 4.0)
+            x1 = cx + math.cos(ang) * inner_r
+            y1 = cy + math.sin(ang) * inner_r
+            x2 = cx + math.cos(ang) * outer_r
+            y2 = cy + math.sin(ang) * outer_r
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        painter.drawEllipse(QPointF(cx, cy), inner_r, inner_r)
+
+    painter.end()
+    return QIcon(pix)
+
+
+class NeomorphicRecordButton(QPushButton):
+    """
+    Dominant circular Dark Neomorphism 2.0 Primary Action Button ("Diktat starten").
+    Features a deep concave outer socket ring with ambient halo, a tactile convex
+    Coral/Orange (#ff6b47 -> #e04622) circular orb, and a crisp vector microphone glyph.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(136, 136)
+        self.setFixedSize(176, 176)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setObjectName("btn_hero_record_cta")
+        self.current_state = "idle"  # "idle", "recording", "transcribing", "formatting", "error"
+        self._hovered = False
+        self._pressed = False
+        self.setStyleSheet("QPushButton#btn_hero_record_cta { background: transparent; border: none; }")
+
+    def set_dictation_state(self, state: str):
+        self.current_state = state
+        self.update()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            self.update()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._pressed = False
+        self.update()
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        cx, cy = w / 2.0, h / 2.0
+        max_r = min(w, h) / 2.0
+
+        # 0. Subtle ambient radial aura around the neomorphic dish
+        aura_grad = QRadialGradient(QPointF(cx, cy), max_r)
+        aura_grad.setColorAt(0.0, QColor(235, 94, 56, 26))
+        aura_grad.setColorAt(0.72, QColor(30, 38, 58, 35))
+        aura_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(aura_grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QRectF(cx - max_r, cy - max_r, max_r * 2.0, max_r * 2.0))
+
+        # 1. Outer Recessed Neomorphic Socket Ring (Level 2 Sunken Dish)
+        outer_r = max_r - 8.0
+        socket_rect = QRectF(cx - outer_r, cy - outer_r, outer_r * 2.0, outer_r * 2.0)
+
+        socket_grad = QLinearGradient(socket_rect.topLeft(), socket_rect.bottomRight())
+        socket_grad.setColorAt(0.0, QColor("#0a0c12"))
+        socket_grad.setColorAt(0.5, QColor("#10141e"))
+        socket_grad.setColorAt(1.0, QColor("#1b2130"))
+        painter.setBrush(QBrush(socket_grad))
+        painter.setPen(QPen(QColor(255, 255, 255, 22), 1.3))
+        painter.drawEllipse(socket_rect)
+
+        # Deep inner concave groove inside the socket
+        rim_r = outer_r - 12.0
+        rim_rect = QRectF(cx - rim_r, cy - rim_r, rim_r * 2.0, rim_r * 2.0)
+        groove_grad = QLinearGradient(rim_rect.topLeft(), rim_rect.bottomRight())
+        groove_grad.setColorAt(0.0, QColor("#07090e"))
+        groove_grad.setColorAt(1.0, QColor("#121621"))
+        painter.setBrush(QBrush(groove_grad))
+        painter.setPen(QPen(QColor(0, 0, 0, 190), 1.6))
+        painter.drawEllipse(rim_rect)
+
+        # 2. Keyboard Focus Ring (WCAG 2.2 AA visible focus indicator)
+        if self.hasFocus():
+            focus_pen = QPen(QColor(ThemeColors.BORDER_FOCUS), 2.5)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(focus_pen)
+            painter.drawEllipse(socket_rect.adjusted(1.5, 1.5, -1.5, -1.5))
+
+        # 3. Inner Raised Coral/Orange Primary Action Orb
+        btn_r = outer_r - 22.0
+        if self._pressed:
+            btn_r -= 2.0
+        btn_rect = QRectF(cx - btn_r, cy - btn_r, btn_r * 2.0, btn_r * 2.0)
+
+        # Warm ambient glow + drop shadow under the raised Coral orb
+        glow_grad = QRadialGradient(QPointF(cx, cy + 4.0), btn_r + 14.0)
+        glow_grad.setColorAt(0.0, QColor(240, 88, 50, 95))
+        glow_grad.setColorAt(0.75, QColor(5, 7, 12, 185))
+        glow_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(glow_grad))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QRectF(cx - btn_r - 12.0, cy - btn_r - 8.0, (btn_r + 12.0) * 2.0, (btn_r + 12.0) * 2.0))
+
+        # Determine fill colors by state
+        if not self.isEnabled():
+            c_top, c_bot, border_col = QColor("#262b3d"), QColor("#1a1e2b"), QColor(255, 255, 255, 25)
+        elif self.current_state == "recording":
+            c_top, c_bot, border_col = QColor("#ff7857"), QColor("#d93f1c"), QColor("#ffad99")
+        elif self.current_state in ("transcribing", "formatting"):
+            c_top, c_bot, border_col = QColor("#6366f1"), QColor("#3d448a"), QColor("#a5b4fc")
+        elif self._pressed:
+            c_top, c_bot, border_col = QColor("#d14b27"), QColor("#b83d1c"), QColor(255, 255, 255, 55)
+        elif self._hovered:
+            c_top, c_bot, border_col = QColor("#ff7754"), QColor("#e34e29"), QColor(255, 200, 180, 120)
+        else:
+            c_top, c_bot, border_col = QColor("#ff6d48"), QColor("#df4926"), QColor(255, 185, 165, 95)
+
+        orb_grad = QLinearGradient(btn_rect.topLeft(), btn_rect.bottomRight())
+        orb_grad.setColorAt(0.0, c_top)
+        orb_grad.setColorAt(1.0, c_bot)
+
+        painter.setBrush(QBrush(orb_grad))
+        painter.setPen(QPen(border_col, 1.5))
+        painter.drawEllipse(btn_rect)
+
+        # 4. Crisp Vector Microphone Icon in the Center (scaled cleanly to orb)
+        icon_col = QColor("#f8fafc") if self.isEnabled() else QColor("#64748b")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(icon_col))
+
+        scale = btn_r / 54.0
+        cap_w = 15.0 * scale
+        cap_h = 25.0 * scale
+        cap_rect = QRectF(cx - cap_w / 2.0, cy - 18.0 * scale, cap_w, cap_h)
+        painter.drawRoundedRect(cap_rect, cap_w / 2.0, cap_w / 2.0)
+
+        # Mic cradle arc & stand
+        pen = QPen(icon_col, max(2.4, 3.1 * scale), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        arc_w = 27.0 * scale
+        arc_h = 25.0 * scale
+        arc_rect = QRectF(cx - arc_w / 2.0, cy - 13.5 * scale, arc_w, arc_h)
+        painter.drawArc(arc_rect, 180 * 16, 180 * 16)
+        stem_top = cy + 11.5 * scale
+        stem_bot = cy + 19.5 * scale
+        painter.drawLine(QPointF(cx, stem_top), QPointF(cx, stem_bot))
+        foot_half = 8.0 * scale
+        painter.drawLine(QPointF(cx - foot_half, stem_bot), QPointF(cx + foot_half, stem_bot))
+
+        painter.end()
+
+
+class StaticDictationWaveformWidget(QWidget):
+    """
+    Muted Indigo/Violet waveform preview inside the 'Letztes Diktat' secondary panel,
+    matching the Dark Neomorphism 2.0 reference layout with quiet dotted rests and two wave bursts.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(36)
+        self.pattern = [
+            0.06, 0.06, 0.06, 0.06, 0.06, 0.16, 0.34, 0.22,
+            0.48, 0.78, 0.96, 0.65, 0.38, 0.72, 0.56, 0.30,
+            0.18, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06, 0.06,
+            0.22, 0.44, 0.75, 0.92, 0.62, 0.35, 0.48, 0.86,
+            0.98, 0.68, 0.52, 0.36, 0.22, 0.12, 0.06, 0.06,
+            0.06, 0.06, 0.06, 0.06,
+        ]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        cy = h / 2.0
+        n = len(self.pattern)
+        bar_w = 2.6
+        gap = max(2.2, (w - n * bar_w) / max(1, n - 1))
+        total_w = n * bar_w + (n - 1) * gap
+        start_x = max(0.0, (w - total_w) / 2.0)
+
+        for i, val in enumerate(self.pattern):
+            bx = start_x + i * (bar_w + gap)
+            if bx + bar_w > w:
+                break
+            if val <= 0.08:
+                dot_r = 2.4
+                by = cy - dot_r / 2.0
+                painter.setBrush(QBrush(QColor("#5b63b8")))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QRectF(bx, by, dot_r, dot_r))
+            else:
+                bh = max(4.0, val * (h * 0.86))
+                by = cy - bh / 2.0
+                grad = QLinearGradient(bx, by, bx, by + bh)
+                grad.setColorAt(0.0, QColor("#818cf8"))
+                grad.setColorAt(0.5, QColor("#6366f1"))
+                grad.setColorAt(1.0, QColor("#4f46e5"))
+                painter.setBrush(QBrush(grad))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.3, 1.3)
+
+        painter.end()
+
+
+class StatusGlowDotWidget(QWidget):
+    """Renders the glowing status indicator dot on the left of the compact bottom status bar."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(22, 22)
+        self.dot_color = QColor("#34d399")
+
+    def set_color(self, hex_color: str):
+        self.dot_color = QColor(hex_color)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+
+        glow = QRadialGradient(QPointF(cx, cy), 10.5)
+        c_glow = QColor(self.dot_color)
+        c_glow.setAlpha(95)
+        c_zero = QColor(self.dot_color)
+        c_zero.setAlpha(0)
+        glow.setColorAt(0.0, c_glow)
+        glow.setColorAt(1.0, c_zero)
+        painter.setBrush(QBrush(glow))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPointF(cx, cy), 10.5, 10.5)
+
+        painter.setBrush(QBrush(self.dot_color))
+        painter.drawEllipse(QPointF(cx, cy), 4.8, 4.8)
+        painter.end()
+
+
+class LanguageSelectorButton(QPushButton):
+    """
+    Renders the status-bar language selector (Vector Globe icon + 'Deutsch' / 'English' + Chevron)
+    matching the Dark Neomorphism 2.0 target image while preserving full language code text for tests.
+    """
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(30)
+        self.setMinimumWidth(118)
+        self._hovered = False
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = float(self.width()), float(self.height())
+        cy = h / 2.0
+
+        if self._hovered:
+            painter.setBrush(QBrush(QColor(255, 255, 255, 10)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(QRectF(0, 2, w, h - 4), 6.0, 6.0)
+
+        # 1. Vector Globe Icon
+        gx, gy, gr = 12.0, cy, 7.2
+        icon_col = QColor("#cbd5e1") if self._hovered else QColor("#94a3b8")
+        painter.setPen(QPen(icon_col, 1.35, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(gx, gy), gr, gr)
+        painter.drawEllipse(QPointF(gx, gy), gr * 0.46, gr)
+        painter.drawLine(QPointF(gx - gr, gy), QPointF(gx + gr, gy))
+
+        # 2. Language Label ("Deutsch" or "English")
+        raw = self.text()
+        display_lang = "Deutsch" if "DE" in raw.upper() and "ENGLISH" not in raw.upper() else "English"
+        font = ThemeTypography.get_qfont(10, QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QColor("#f8fafc") if self._hovered else QColor("#e2e8f0"))
+        text_rect = QRectF(27.0, 0.0, w - 46.0, h)
+        painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), display_lang)
+
+        # 3. Vector Downward Chevron
+        cx = w - 13.0
+        chev_pen = QPen(icon_col, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(chev_pen)
+        painter.drawLine(QPointF(cx - 3.8, cy - 1.2), QPointF(cx, cy + 2.4))
+        painter.drawLine(QPointF(cx, cy + 2.4), QPointF(cx + 3.8, cy - 1.2))
+        painter.end()
+
+
+class LatencyWaveBadgeButton(QPushButton):
+    """
+    Renders the right-aligned latency indicator in the status bar with a 5-bar indigo soundwave icon
+    and '0,4 s Latenz' text matching the Dark Neomorphism 2.0 target image.
+    """
+    def __init__(self, text: str = "0,4 s Latenz", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(30)
+        self.setMinimumWidth(122)
+        self._hovered = False
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = float(self.width()), float(self.height())
+        cy = h / 2.0
+
+        if self._hovered:
+            painter.setBrush(QBrush(QColor(255, 255, 255, 10)))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(QRectF(0, 2, w, h - 4), 6.0, 6.0)
+
+        # 1. Mini 5-bar Violet/Indigo Soundwave Icon
+        bars = [0.22, 0.52, 0.90, 0.52, 0.22]
+        bw = 2.0
+        bgap = 1.8
+        sx = 8.0
+        for idx, bh_rel in enumerate(bars):
+            bh = max(3.0, bh_rel * 15.0)
+            bx = sx + idx * (bw + bgap)
+            by = cy - bh / 2.0
+            grad = QLinearGradient(bx, by, bx, by + bh)
+            grad.setColorAt(0.0, QColor("#818cf8"))
+            grad.setColorAt(1.0, QColor("#4f46e5"))
+            painter.setBrush(QBrush(grad))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(QRectF(bx, by, bw, bh), 1.0, 1.0)
+
+        # 2. Clean Latency Label
+        raw = self.text().replace("〰", "").strip()
+        font = ThemeTypography.get_qfont(10, QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QColor("#f8fafc") if self._hovered else QColor("#e2e8f0"))
+        text_rect = QRectF(32.0, 0.0, w - 36.0, h)
+        painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), raw)
+        painter.end()
+
+
 
 class ModelPresetCard(QFrame):
     """
-    Dedicated unclipped hardware model preset card.
-    Avoids QPushButton internal child-layout squashing and font overlap bugs.
+    Dedicated unclipped hardware model preset card in Dark Neomorphism 2.0 style.
     """
     clicked = pyqtSignal(str)
 
@@ -69,23 +541,23 @@ class ModelPresetCard(QFrame):
         self.key = key
         self.selected = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(70)
+        self.setMinimumHeight(72)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(3)
+        layout.setSpacing(4)
 
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
 
         self.lbl_name = QLabel(name)
-        self.lbl_name.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #ffffff; background: transparent;")
+        self.lbl_name.setStyleSheet(f"font-size: 12.5px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
 
         self.lbl_tag = QLabel(tag)
         self.lbl_tag.setStyleSheet(
-            "font-size: 9.5px; font-weight: 600; color: #8a8a96; background: rgba(255, 255, 255, 0.05); "
-            "padding: 1px 5px; border-radius: 3px;"
+            f"font-size: 9.5px; font-weight: 600; color: {ThemeColors.TEXT_MUTED}; background: {ThemeColors.BG_SUNKEN}; "
+            f"padding: 2px 6px; border-radius: {ThemeMetrics.RADIUS_BADGE}; border: 1px solid {ThemeColors.BORDER_SUBTLE};"
         )
 
         top_row.addWidget(self.lbl_name)
@@ -95,7 +567,7 @@ class ModelPresetCard(QFrame):
 
         self.lbl_desc = QLabel(desc)
         self.lbl_desc.setWordWrap(True)
-        self.lbl_desc.setStyleSheet("font-size: 11px; color: #94949e; background: transparent;")
+        self.lbl_desc.setStyleSheet(f"font-size: 11px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
         layout.addWidget(self.lbl_desc)
 
         self.lbl_led = QLabel(f'<span style="color:{led_color}; font-size:10px; font-weight:600;">{led_text}</span>')
@@ -115,17 +587,26 @@ class ModelPresetCard(QFrame):
     def update_style(self):
         if self.selected:
             self.setStyleSheet(
-                "ModelPresetCard { background-color: #172033; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 7px; }"
+                f"ModelPresetCard {{ background-color: {ThemeColors.CHIP_BG_SELECTED}; "
+                f"border: 1.5px solid {ThemeColors.ACCENT_INDIGO_BRIGHT}; border-radius: {ThemeMetrics.RADIUS_CARD}; }} "
+                f"ModelPresetCard:hover {{ background-color: {ThemeColors.CHIP_BG_SELECTED_HOVER}; }}"
             )
-            self.lbl_name.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #ffffff; background: transparent;")
-            self.lbl_desc.setStyleSheet("font-size: 11px; color: #bae6fd; background: transparent;")
+            self.lbl_name.setStyleSheet(f"font-size: 12.5px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
+            self.lbl_desc.setStyleSheet("font-size: 11px; color: #c7d2fe; background: transparent;")
         else:
             self.setStyleSheet(
-                "ModelPresetCard { background-color: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.045); border-radius: 7px; } "
-                "ModelPresetCard:hover { background-color: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.09); }"
+                f"ModelPresetCard {{ background-color: {ThemeColors.BG_CARD}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CARD}; }} "
+                f"ModelPresetCard:hover {{ background-color: {ThemeColors.BG_CARD_HOVER}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HOVER}; "
+                f"border-color: {ThemeColors.BORDER_HOVER}; }}"
             )
-            self.lbl_name.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #eeeeef; background: transparent;")
-            self.lbl_desc.setStyleSheet("font-size: 11px; color: #94949e; background: transparent;")
+            self.lbl_name.setStyleSheet(f"font-size: 12.5px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;")
+            self.lbl_desc.setStyleSheet(f"font-size: 11px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -135,7 +616,7 @@ class ModelPresetCard(QFrame):
 
 class ModePresetCard(QFrame):
     """
-    Dedicated unclipped operational mode card for Studio Tab.
+    Tactile Dark Neomorphism 2.0 card for operating mode selection (Flow Mode vs Raw Dictation).
     """
     clicked = pyqtSignal(str)
 
@@ -144,20 +625,20 @@ class ModePresetCard(QFrame):
         self.key = key
         self.selected = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(60)
+        self.setMinimumHeight(54)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(3)
 
         self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #eeeeef; background: transparent;")
+        self.lbl_title.setStyleSheet(f"font-size: 12.5px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
         layout.addWidget(self.lbl_title)
 
         self.lbl_sub = QLabel(sub)
         self.lbl_sub.setWordWrap(True)
-        self.lbl_sub.setStyleSheet("font-size: 11px; color: #787884; background: transparent;")
+        self.lbl_sub.setStyleSheet(f"font-size: 11px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
         layout.addWidget(self.lbl_sub)
 
         self.update_style()
@@ -169,17 +650,25 @@ class ModePresetCard(QFrame):
     def update_style(self):
         if self.selected:
             self.setStyleSheet(
-                "ModePresetCard { background-color: #172033; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 7px; }"
+                f"ModePresetCard {{ background-color: {ThemeColors.CHIP_BG_SELECTED}; "
+                f"border: 1.5px solid {ThemeColors.ACCENT_INDIGO_BRIGHT}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CARD}; }}"
             )
-            self.lbl_title.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #ffffff; background: transparent;")
-            self.lbl_sub.setStyleSheet("font-size: 11px; color: #bae6fd; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 12.5px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
+            self.lbl_sub.setStyleSheet("font-size: 11px; color: #c7d2fe; background: transparent;")
         else:
             self.setStyleSheet(
-                "ModePresetCard { background-color: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 7px; } "
-                "ModePresetCard:hover { background-color: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.08); }"
+                f"ModePresetCard {{ background-color: {ThemeColors.BG_CARD}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CARD}; }} "
+                f"ModePresetCard:hover {{ background-color: {ThemeColors.BG_CARD_HOVER}; "
+                f"border-color: {ThemeColors.BORDER_HOVER}; }}"
             )
-            self.lbl_title.setStyleSheet("font-size: 12.5px; font-weight: 600; color: #eeeeef; background: transparent;")
-            self.lbl_sub.setStyleSheet("font-size: 11px; color: #787884; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 12.5px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;")
+            self.lbl_sub.setStyleSheet(f"font-size: 11px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -189,7 +678,7 @@ class ModePresetCard(QFrame):
 
 class TonePresetCard(QFrame):
     """
-    Dedicated unclipped tone profile card for Studio Tab.
+    Tactile Dark Neomorphism 2.0 card for Tone & Style profile selection.
     """
     clicked = pyqtSignal(str)
 
@@ -198,30 +687,30 @@ class TonePresetCard(QFrame):
         self.key = key
         self.selected = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(52)
+        self.setMinimumHeight(50)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(2)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(3)
 
         top = QHBoxLayout()
         top.setSpacing(6)
         self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; color: #eeeeef; background: transparent;")
+        self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;")
         self.lbl_tag = QLabel(tag)
         self.lbl_tag.setStyleSheet(
-            "font-size: 9px; font-weight: 600; color: #8a8a96; background: rgba(255, 255, 255, 0.05); "
-            "padding: 1px 4px; border-radius: 3px;"
+            f"font-size: 9px; font-weight: 600; color: {ThemeColors.TEXT_MUTED}; background: {ThemeColors.BG_SUNKEN}; "
+            f"padding: 2px 6px; border-radius: 5px; border: 1px solid {ThemeColors.BORDER_SUBTLE};"
         )
         top.addWidget(self.lbl_title)
-        top.addWidget(self.lbl_tag)
         top.addStretch()
+        top.addWidget(self.lbl_tag)
         layout.addLayout(top)
 
         self.lbl_sub = QLabel(sub)
         self.lbl_sub.setWordWrap(True)
-        self.lbl_sub.setStyleSheet("font-size: 10.5px; color: #787884; background: transparent;")
+        self.lbl_sub.setStyleSheet(f"font-size: 10.5px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
         layout.addWidget(self.lbl_sub)
 
         self.update_style()
@@ -233,17 +722,33 @@ class TonePresetCard(QFrame):
     def update_style(self):
         if self.selected:
             self.setStyleSheet(
-                "TonePresetCard { background-color: #172033; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 7px; }"
+                f"TonePresetCard {{ background-color: {ThemeColors.CHIP_BG_SELECTED}; "
+                f"border: 1.5px solid {ThemeColors.ACCENT_INDIGO_BRIGHT}; "
+                f"border-radius: 12px; }}"
             )
-            self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; color: #ffffff; background: transparent;")
-            self.lbl_sub.setStyleSheet("font-size: 10.5px; color: #bae6fd; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
+            self.lbl_tag.setStyleSheet(
+                f"font-size: 9px; font-weight: 700; color: #e0e7ff; background: {ThemeColors.ACCENT_INDIGO}; "
+                f"padding: 2px 6px; border-radius: 5px; border: none;"
+            )
+            self.lbl_sub.setStyleSheet("font-size: 10.5px; color: #c7d2fe; background: transparent;")
         else:
             self.setStyleSheet(
-                "TonePresetCard { background-color: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 7px; } "
-                "TonePresetCard:hover { background-color: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.08); }"
+                f"TonePresetCard {{ background-color: {ThemeColors.BG_CARD}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-radius: 12px; }} "
+                f"TonePresetCard:hover {{ background-color: {ThemeColors.BG_CARD_HOVER}; "
+                f"border-color: {ThemeColors.BORDER_HOVER}; }}"
             )
-            self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; color: #eeeeef; background: transparent;")
-            self.lbl_sub.setStyleSheet("font-size: 10.5px; color: #787884; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;")
+            self.lbl_tag.setStyleSheet(
+                f"font-size: 9px; font-weight: 600; color: {ThemeColors.TEXT_MUTED}; background: {ThemeColors.BG_SUNKEN}; "
+                f"padding: 2px 6px; border-radius: 5px; border: 1px solid {ThemeColors.BORDER_SUBTLE};"
+            )
+            self.lbl_sub.setStyleSheet(f"font-size: 10.5px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -253,11 +758,11 @@ class TonePresetCard(QFrame):
 
 class LevelCalibrationWidget(QFrame):
     """
-    Live Audio Calibration Helper & Visual Peak Meter.
+    Live Audio Calibration Helper & Visual Peak Meter inside a sunken neomorphic well.
     Shows current microphone signal levels with 3 color-coded target zones:
-    1. Blue (< 30% / < -28 dB): Zu leise
-    2. Emerald Green (30% - 80% / -24 dB to -6 dB): Optimaler Whisper-Pegel
-    3. Red (> 80% / > -3 dB): Clipping-Gefahr
+    1. Indigo (< 30%): Too quiet
+    2. Mint Green (30% - 80%): Optimal Whisper level
+    3. Coral/Red (> 80%): Clipping risk
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -267,7 +772,12 @@ class LevelCalibrationWidget(QFrame):
         self.decay_timer = QTimer(self)
         self.decay_timer.timeout.connect(self._decay)
         self.decay_timer.start(30)
-        self.setStyleSheet("background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.04); border-radius: 6px;")
+        self.setStyleSheet(
+            f"background: {ThemeColors.BG_SUNKEN}; "
+            f"border-top: 1px solid {ThemeColors.BORDER_SUNKEN_TOP}; "
+            f"border-bottom: 1px solid {ThemeColors.BORDER_SUNKEN_BOTTOM}; "
+            f"border-radius: 8px;"
+        )
 
     def update_level(self, rms: float):
         gain = getattr(config.audio, "input_gain", 1.0)
@@ -293,56 +803,56 @@ class LevelCalibrationWidget(QFrame):
         bar_w = max(40.0, w - 24.0)
         bar_h = 10.0
 
-        # Background track
+        # Sunken track
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(20, 20, 26)))
+        painter.setBrush(QBrush(QColor("#080a10")))
         painter.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 3.0, 3.0)
 
         # 3-Zone target brackets
         z1_w = bar_w * 0.30
-        painter.setBrush(QBrush(QColor(56, 189, 248, 25)))
+        painter.setBrush(QBrush(QColor(99, 102, 241, 35)))
         painter.drawRoundedRect(QRectF(bar_x, bar_y, z1_w, bar_h), 3.0, 3.0)
 
         z2_x = bar_x + z1_w
         z2_w = bar_w * 0.50
-        painter.setBrush(QBrush(QColor(16, 185, 129, 45)))
+        painter.setBrush(QBrush(QColor(52, 211, 153, 45)))
         painter.drawRoundedRect(QRectF(z2_x, bar_y, z2_w, bar_h), 0.0, 0.0)
 
         z3_x = z2_x + z2_w
         z3_w = bar_w - z1_w - z2_w
-        painter.setBrush(QBrush(QColor(239, 68, 68, 35)))
+        painter.setBrush(QBrush(QColor(235, 94, 56, 40)))
         painter.drawRoundedRect(QRectF(z3_x, bar_y, z3_w, bar_h), 3.0, 3.0)
 
         fill_w = max(0.0, min(bar_w, bar_w * self.current_level))
         if fill_w > 0:
             grad = QLinearGradient(bar_x, 0, bar_x + bar_w, 0)
-            grad.setColorAt(0.0, QColor(56, 189, 248))
-            grad.setColorAt(0.30, QColor(16, 185, 129))
-            grad.setColorAt(0.80, QColor(234, 179, 8))
-            grad.setColorAt(0.95, QColor(239, 68, 68))
+            grad.setColorAt(0.0, QColor("#7c83e0"))
+            grad.setColorAt(0.30, QColor("#34d399"))
+            grad.setColorAt(0.80, QColor("#f59e0b"))
+            grad.setColorAt(0.95, QColor("#eb5e38"))
             painter.setBrush(QBrush(grad))
             painter.drawRoundedRect(QRectF(bar_x, bar_y, fill_w, bar_h), 3.0, 3.0)
 
         if self.peak_level > 0.01:
             px = bar_x + min(bar_w - 2.0, bar_w * self.peak_level)
-            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.8))
+            painter.setPen(QPen(QColor(248, 250, 252, 230), 1.8))
             painter.drawLine(int(px), int(bar_y - 1), int(px), int(bar_y + bar_h + 1))
 
         painter.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
-        painter.setPen(QColor("#71717a"))
+        painter.setPen(QColor("#94a3b8"))
         painter.drawText(int(bar_x), int(bar_y + bar_h + 16), tr("meter_too_quiet"))
 
-        painter.setPen(QColor("#10b981"))
+        painter.setPen(QColor("#34d399"))
         painter.drawText(int(z2_x + 6), int(bar_y + bar_h + 16), tr("meter_optimal"))
 
-        painter.setPen(QColor("#f87171"))
+        painter.setPen(QColor("#f26b46"))
         painter.drawText(int(z3_x - 10), int(bar_y + bar_h + 16), tr("meter_clipping"))
         painter.end()
 
 
 class ModelPriorityCard(QFrame):
     """
-    Selectable 3-Tier Priority Card (Schnelligkeit vs Ausgewogen vs Höchste Qualität).
+    Selectable 3-Tier Priority Card (Speed vs Balanced vs Quality) in Dark Neomorphism 2.0.
     """
     clicked = pyqtSignal(str)
 
@@ -351,24 +861,24 @@ class ModelPriorityCard(QFrame):
         self.key = key
         self.selected = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(60)
+        self.setMinimumHeight(62)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setContentsMargins(14, 9, 14, 9)
         layout.setSpacing(3)
 
         top = QHBoxLayout()
         top.setSpacing(6)
         self.lbl_title = QLabel(title)
         self.lbl_title.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #eeeeef; background: transparent;")
+        self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
 
         self.lbl_badge = QLabel(badge)
         self.lbl_badge.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_badge.setStyleSheet(
-            "font-size: 9px; font-weight: 600; color: #38bdf8; background: rgba(56, 189, 248, 0.1); "
-            "padding: 1px 5px; border-radius: 3px; border: 1px solid rgba(56, 189, 248, 0.25);"
+            f"font-size: 9px; font-weight: 600; color: {ThemeColors.ACCENT_INDIGO_BRIGHT}; background: {ThemeColors.ACCENT_INDIGO_MUTED}; "
+            f"padding: 1px 6px; border-radius: 4px; border: 1px solid {ThemeColors.ACCENT_INDIGO_BORDER};"
         )
         top.addWidget(self.lbl_title)
         top.addWidget(self.lbl_badge)
@@ -378,7 +888,7 @@ class ModelPriorityCard(QFrame):
         self.lbl_sub = QLabel(sub)
         self.lbl_sub.setTextFormat(Qt.TextFormat.PlainText)
         self.lbl_sub.setWordWrap(True)
-        self.lbl_sub.setStyleSheet("font-size: 10px; color: #787884; background: transparent;")
+        self.lbl_sub.setStyleSheet(f"font-size: 10.5px; color: {ThemeColors.TEXT_MUTED}; background: transparent;")
         layout.addWidget(self.lbl_sub)
 
         self.update_style()
@@ -393,27 +903,40 @@ class ModelPriorityCard(QFrame):
         self.update_style()
 
     def update_style(self):
+        accent_color = ThemeColors.ACCENT_INDIGO_BRIGHT
+        if self.key == "balanced":
+            accent_color = ThemeColors.SUCCESS
+        elif self.key == "quality":
+            accent_color = ThemeColors.ACCENT_CORAL
+
         if self.selected:
             self.setStyleSheet(
-                "QFrame { background-color: #172033; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 7px; }"
+                f"QFrame {{ background-color: {ThemeColors.CHIP_BG_SELECTED}; border: 1.5px solid {accent_color}; border-radius: {ThemeMetrics.RADIUS_CARD}; }}"
             )
-            self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; color: #ffffff; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
             self.lbl_badge.setStyleSheet(
-                "font-size: 9px; font-weight: 600; color: #38bdf8; background: rgba(56, 189, 248, 0.2); "
-                "padding: 1px 5px; border-radius: 3px; border: 1px solid rgba(56, 189, 248, 0.45);"
+                f"font-size: 9px; font-weight: 600; color: {accent_color}; background: {ThemeColors.BG_SUNKEN}; "
+                f"padding: 1px 6px; border-radius: {ThemeMetrics.RADIUS_BADGE}; border: 1px solid {accent_color};"
             )
-            self.lbl_sub.setStyleSheet("font-size: 10px; color: #bae6fd; background: transparent; font-weight: 400;")
+            self.lbl_sub.setStyleSheet("font-size: 10.5px; color: #e2e8f0; background: transparent; font-weight: 400;")
         else:
             self.setStyleSheet(
-                "QFrame { background-color: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.045); border-radius: 7px; } "
-                "QFrame:hover { background-color: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.09); }"
+                f"QFrame {{ background-color: {ThemeColors.BG_CARD}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CARD}; }} "
+                f"QFrame:hover {{ background-color: {ThemeColors.BG_CARD_HOVER}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HOVER}; "
+                f"border-color: {ThemeColors.BORDER_HOVER}; }}"
             )
-            self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 600; color: #eeeeef; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;")
             self.lbl_badge.setStyleSheet(
-                "font-size: 9px; font-weight: 600; color: #8a8a96; background: rgba(255, 255, 255, 0.05); "
-                "padding: 1px 5px; border-radius: 3px; border: none;"
+                f"font-size: 9px; font-weight: 600; color: {ThemeColors.TEXT_MUTED}; background: {ThemeColors.BG_SUNKEN}; "
+                f"padding: 1px 6px; border-radius: {ThemeMetrics.RADIUS_BADGE}; border: 1px solid {ThemeColors.BORDER_SUBTLE};"
             )
-            self.lbl_sub.setStyleSheet("font-size: 10px; color: #787884; background: transparent; font-weight: 400;")
+            self.lbl_sub.setStyleSheet(f"font-size: 10.5px; color: {ThemeColors.TEXT_MUTED}; background: transparent; font-weight: 400;")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -421,17 +944,75 @@ class ModelPriorityCard(QFrame):
         super().mousePressEvent(event)
 
 
+class SubModelChip(QPushButton):
+    """
+    Selectable Neomorphic Pill-style chip button for sub-models within the active tier.
+    """
+    def __init__(self, model_id: str, label: str, price_badge: str = "", parent=None):
+        super().__init__(parent)
+        self.model_id = model_id
+        self.label = label
+        self.price_badge = price_badge
+        self.selected = False
+        text_disp = f"{label}   ({price_badge})" if price_badge else label
+        self.setText(text_disp)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFixedHeight(28)
+        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.update_style()
+
+    def set_selected(self, val: bool):
+        self.selected = bool(val)
+        self.update_style()
+
+    def update_style(self):
+        if self.selected:
+            self.setStyleSheet(
+                f"QPushButton {{ background-color: {ThemeColors.CHIP_BG_SELECTED}; color: {ThemeColors.TEXT_PRIMARY}; "
+                f"border: 1.5px solid {ThemeColors.ACCENT_INDIGO_BRIGHT}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CONTROL}; font-size: 11px; font-weight: 600; padding: 2px 12px; }} "
+                f"QPushButton:hover {{ background-color: {ThemeColors.CHIP_BG_SELECTED_HOVER}; }}"
+            )
+        else:
+            self.setStyleSheet(
+                f"QPushButton {{ background-color: {ThemeColors.BG_ELEVATED}; color: {ThemeColors.CHIP_TEXT_UNSELECTED}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CONTROL}; font-size: 11px; font-weight: 500; padding: 2px 12px; }} "
+                f"QPushButton:hover {{ background-color: {ThemeColors.BG_ELEVATED_HOVER}; color: {ThemeColors.TEXT_PRIMARY}; border-color: {ThemeColors.BORDER_HOVER}; }}"
+            )
+
+
 class CollapsibleSettingsCard(QFrame):
     """
-    Clean, modern accordion card with click-to-toggle header, live status badge, description, and hover effects.
+    Dark Neomorphism 2.0 settings section card with raised graphite surface,
+    dual bevel borders, clear summary pill, and progressive disclosure body.
     """
     def __init__(self, title: str, summary: str = "", description: str = "", is_expanded: bool = False, parent=None):
         super().__init__(parent)
         self.setObjectName("card")
         self.is_expanded = is_expanded
 
+        self.setStyleSheet(
+            f"QFrame#card {{ "
+            f"  background-color: {ThemeColors.BG_CARD}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"  border-bottom: 2px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"  border-radius: {ThemeMetrics.RADIUS_CARD}; "
+            f"}} "
+            f"QFrame#card:hover {{ "
+            f"  background-color: {ThemeColors.BG_CARD_HOVER}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HOVER}; "
+            f"}}"
+        )
+
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(16, 12, 16, 12)
+        self.main_layout.setContentsMargins(20, 15, 20, 15)
         self.main_layout.setSpacing(6)
 
         # Header (Clickable)
@@ -439,23 +1020,34 @@ class CollapsibleSettingsCard(QFrame):
         self.header_widget.setCursor(Qt.CursorShape.PointingHandCursor)
         h_layout = QHBoxLayout(self.header_widget)
         h_layout.setContentsMargins(0, 0, 0, 0)
-        h_layout.setSpacing(10)
+        h_layout.setSpacing(12)
 
         self.lbl_title = QLabel(title)
         self.lbl_title.setObjectName("section_title")
         self.lbl_title.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #ffffff; background: transparent;")
+        self.lbl_title.setStyleSheet(
+            f"font-size: 13.5px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; letter-spacing: 0.1px; background: transparent;"
+        )
 
         self.lbl_summary = QLabel(summary)
         self.lbl_summary.setTextFormat(Qt.TextFormat.PlainText)
-        self.lbl_summary.setStyleSheet("font-size: 11px; color: #71717a; font-weight: 500; background: transparent;")
+        self.lbl_summary.setStyleSheet(
+            f"font-size: 11px; color: {ThemeColors.TEXT_MUTED}; font-weight: 500; background-color: {ThemeColors.BG_SUNKEN}; "
+            f"padding: 3px 10px; border-radius: 8px; border-top: 1px solid {ThemeColors.BORDER_SUNKEN_TOP}; "
+            f"border-bottom: 1px solid {ThemeColors.BORDER_SUNKEN_BOTTOM};"
+        )
 
-        self.lbl_toggle = QLabel("[-]" if is_expanded else "[+]")
-        self.lbl_toggle.setStyleSheet("font-size: 11px; font-weight: 700; color: #38bdf8; background: transparent;")
+        self.lbl_toggle = QLabel("▾" if is_expanded else "▸")
+        self.lbl_toggle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_toggle.setFixedSize(24, 24)
+        self.lbl_toggle.setStyleSheet(
+            f"font-size: 12px; font-weight: 700; color: {ThemeColors.TEXT_MUTED}; background: {ThemeColors.BG_ELEVATED}; "
+            f"border-radius: 6px; border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM};"
+        )
 
         h_layout.addWidget(self.lbl_title)
-        h_layout.addWidget(self.lbl_summary)
         h_layout.addStretch()
+        h_layout.addWidget(self.lbl_summary)
         h_layout.addWidget(self.lbl_toggle)
 
         self.main_layout.addWidget(self.header_widget)
@@ -465,7 +1057,7 @@ class CollapsibleSettingsCard(QFrame):
             self.lbl_desc = QLabel(description)
             self.lbl_desc.setTextFormat(Qt.TextFormat.PlainText)
             self.lbl_desc.setWordWrap(True)
-            self.lbl_desc.setStyleSheet("font-size: 11px; color: #828290; margin-top: -2px; margin-bottom: 4px; background: transparent;")
+            self.lbl_desc.setStyleSheet(f"font-size: 11px; color: {ThemeColors.TEXT_MUTED}; margin-top: -2px; margin-bottom: 4px; background: transparent;")
             self.main_layout.addWidget(self.lbl_desc)
         else:
             self.lbl_desc = None
@@ -473,8 +1065,8 @@ class CollapsibleSettingsCard(QFrame):
         # Content Body
         self.body_widget = QWidget()
         self.body_layout = QVBoxLayout(self.body_widget)
-        self.body_layout.setContentsMargins(0, 4, 0, 0)
-        self.body_layout.setSpacing(10)
+        self.body_layout.setContentsMargins(0, 10, 0, 2)
+        self.body_layout.setSpacing(12)
         self.body_widget.setVisible(is_expanded)
 
         self.main_layout.addWidget(self.body_widget)
@@ -487,6 +1079,7 @@ class CollapsibleSettingsCard(QFrame):
 
     def set_summary(self, text: str):
         self.lbl_summary.setText(text)
+        self.lbl_summary.setVisible(bool(text.strip()))
 
     def set_description(self, text: str):
         if self.lbl_desc:
@@ -498,11 +1091,151 @@ class CollapsibleSettingsCard(QFrame):
     def set_expanded(self, val: bool):
         self.is_expanded = val
         self.body_widget.setVisible(val)
-        self.lbl_toggle.setText("[-]" if val else "[+]")
+        self.lbl_toggle.setText("▾" if val else "▸")
         if val:
-            self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #ffffff; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 13.5px; font-weight: 700; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;")
+            self.lbl_toggle.setStyleSheet(
+                f"font-size: 12px; font-weight: 700; color: #ffffff; background: {ThemeColors.ACCENT_INDIGO_SURFACE}; "
+                f"border-radius: 6px; border: 1px solid {ThemeColors.ACCENT_INDIGO_BRIGHT};"
+            )
         else:
-            self.lbl_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #d4d4d8; background: transparent;")
+            self.lbl_title.setStyleSheet(f"font-size: 13.5px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;")
+            self.lbl_toggle.setStyleSheet(
+                f"font-size: 12px; font-weight: 700; color: {ThemeColors.TEXT_MUTED}; background: {ThemeColors.BG_ELEVATED}; "
+                f"border-radius: 6px; border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM};"
+            )
+
+
+class SettingsDisclosureSection(QFrame):
+    """
+    Recessed Dark Neomorphism 2.0 progressive disclosure sub-accordion for technical details.
+    """
+    toggled = pyqtSignal(bool)
+
+    def __init__(
+        self,
+        title: str,
+        summary: str = "",
+        is_expanded: bool = False,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setObjectName("disclosure_section")
+        self.is_expanded = is_expanded
+
+        self.setStyleSheet(
+            f"QFrame#disclosure_section {{ "
+            f"  background-color: {ThemeColors.BG_SUNKEN}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SUNKEN_TOP}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUNKEN_LEFT}; "
+            f"  border-bottom: 1px solid {ThemeColors.BORDER_SUNKEN_BOTTOM}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_SUNKEN_RIGHT}; "
+            f"  border-radius: 10px; "
+            f"}} "
+            f"QFrame#disclosure_section:hover {{ "
+            f"  border-color: {ThemeColors.BORDER_HOVER}; "
+            f"}}"
+        )
+
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(14, 10, 14, 10)
+        self.main_layout.setSpacing(6)
+
+        # Clickable Header
+        self.header_widget = QWidget()
+        self.header_widget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header_widget.setStyleSheet("background: transparent;")
+        h_layout = QHBoxLayout(self.header_widget)
+        h_layout.setContentsMargins(2, 2, 2, 2)
+        h_layout.setSpacing(8)
+
+        self.lbl_toggle = QLabel("▾" if is_expanded else "▸")
+        self.lbl_toggle.setStyleSheet(
+            f"font-size: 11.5px; font-weight: 700; color: {ThemeColors.ACCENT_INDIGO_BRIGHT}; background: transparent;"
+        )
+
+        self.lbl_title = QLabel(title)
+        self.lbl_title.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_title.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;"
+        )
+
+        self.lbl_summary = QLabel(summary)
+        self.lbl_summary.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_summary.setStyleSheet(
+            f"font-size: 10.5px; font-weight: 500; color: {ThemeColors.TEXT_MUTED}; background: transparent;"
+        )
+
+        h_layout.addWidget(self.lbl_toggle)
+        h_layout.addWidget(self.lbl_title)
+        h_layout.addStretch()
+        h_layout.addWidget(self.lbl_summary)
+        self.main_layout.addWidget(self.header_widget)
+
+        # Content Body
+        self.body_widget = QWidget()
+        self.body_layout = QVBoxLayout(self.body_widget)
+        self.body_layout.setContentsMargins(6, 6, 6, 4)
+        self.body_layout.setSpacing(8)
+        self.body_widget.setVisible(is_expanded)
+        self.main_layout.addWidget(self.body_widget)
+
+        self.header_widget.mousePressEvent = self._on_header_clicked
+
+    def _on_header_clicked(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.toggle()
+
+    def toggle(self):
+        self.set_expanded(not self.is_expanded)
+
+    def set_expanded(self, val: bool):
+        self.is_expanded = val
+        self.body_widget.setVisible(val)
+        self.lbl_toggle.setText("▾" if val else "▸")
+        if val:
+            self.lbl_title.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_PRIMARY}; background: transparent;"
+            )
+            self.lbl_toggle.setStyleSheet(
+                f"font-size: 11.5px; font-weight: 700; color: {ThemeColors.ACCENT_CORAL}; background: transparent;"
+            )
+        else:
+            self.lbl_title.setStyleSheet(
+                f"font-size: 12px; font-weight: 600; color: {ThemeColors.TEXT_SECONDARY}; background: transparent;"
+            )
+            self.lbl_toggle.setStyleSheet(
+                f"font-size: 11.5px; font-weight: 700; color: {ThemeColors.ACCENT_INDIGO_BRIGHT}; background: transparent;"
+            )
+        self.toggled.emit(val)
+
+    def set_title(self, text: str):
+        self.lbl_title.setText(text)
+
+    def set_summary(self, text: str):
+        self.lbl_summary.setText(text)
+
+    def matches_query(self, query: str) -> bool:
+        """Recursively checks whether query matches title, summary, or any child control."""
+        q = query.lower()
+        if q in self.lbl_title.text().lower():
+            return True
+        if q in self.lbl_summary.text().lower():
+            return True
+        for child in self.body_widget.findChildren((QLabel, QCheckBox, QPushButton, QLineEdit, QComboBox)):
+            if isinstance(child, (QLabel, QCheckBox, QPushButton)) and q in child.text().lower():
+                return True
+            elif isinstance(child, QLineEdit) and (
+                q in child.placeholderText().lower() or q in child.text().lower()
+            ):
+                return True
+            elif isinstance(child, QComboBox):
+                for i in range(child.count()):
+                    if q in child.itemText(i).lower():
+                        return True
+                if q in child.currentText().lower():
+                    return True
+        return False
 
 
 # =========================================================================
@@ -510,46 +1243,51 @@ class CollapsibleSettingsCard(QFrame):
 # =========================================================================
 
 class HotkeyCaptureDialog(QDialog):
-    """Clean minimalist dialog to record key combinations without clutter."""
+    """Dark Neomorphism 2.0 modal dialog to record key combinations."""
     def __init__(self, current_key="f8", parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr("hotkey_dialog_title"))
-        self.setFixedSize(380, 190)
+        self.setFixedSize(390, 200)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setStyleSheet(
-            "QDialog { background-color: #131317; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; }"
-            "QLabel { color: #f1f1f4; font-size: 12px; }"
+            f"QDialog {{ background-color: {ThemeColors.BG_DIALOG}; "
+            f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HERO}; "
+            f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"border-bottom: 2px solid {ThemeColors.BORDER_BOTTOM}; border-radius: 14px; }}"
+            f"QLabel {{ color: {ThemeColors.TEXT_PRIMARY}; font-size: 12px; }}"
         )
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(12)
 
         title = QLabel(tr("hotkey_dialog_heading"))
-        title.setStyleSheet("font-size: 13.5px; font-weight: 700; color: #ffffff;")
+        title.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {ThemeColors.TEXT_PRIMARY};")
         layout.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
 
         sub = QLabel(tr("hotkey_dialog_sub"))
         sub.setWordWrap(True)
-        sub.setStyleSheet("color: #787884; font-size: 11px;")
+        sub.setStyleSheet(f"color: {ThemeColors.TEXT_MUTED}; font-size: 11px;")
         layout.addWidget(sub, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.key_display = QLabel(current_key.upper())
         self.key_display.setStyleSheet(
-            "background-color: rgba(255, 255, 255, 0.04); color: #38bdf8; font-weight: 700; font-size: 13px; "
-            "letter-spacing: 0.8px; padding: 7px 16px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.08);"
+            f"background-color: {ThemeColors.BG_SUNKEN}; color: {ThemeColors.ACCENT_CORAL}; font-weight: 700; font-size: 13px; "
+            f"letter-spacing: 0.8px; padding: 8px 18px; border-radius: 8px; "
+            f"border-top: 1px solid {ThemeColors.BORDER_SUNKEN_TOP}; border-bottom: 1px solid {ThemeColors.BORDER_SUNKEN_BOTTOM};"
         )
         layout.addWidget(self.key_display, alignment=Qt.AlignmentFlag.AlignCenter)
 
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
+        btn_row.setSpacing(10)
 
         self.btn_cancel = QPushButton(tr("cancel"))
         self.btn_cancel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_cancel.clicked.connect(self.reject)
 
         self.btn_save = QPushButton(tr("save"))
-        self.btn_save.setObjectName("btn_primary")
+        self.btn_save.setObjectName("btn_primary_coral")
         self.btn_save.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_save.clicked.connect(self.accept)
 
@@ -604,52 +1342,71 @@ class HotkeyCaptureDialog(QDialog):
 
 
 # =========================================================================
-# 3. Minimalist Audio Spectrum Visualizer Widget
+# 3. Dark Neomorphism 2.0 Audio Spectrum Visualizer Widget
 # =========================================================================
 
 class HeroWaveformWidget(QWidget):
     """
-    Calm 36-bar Audio Spectrum Analyzer.
-    Renders steady ambient presence or real-time voice reactivity at 60 FPS.
+    Calm 36-bar Audio Spectrum Analyzer with Dark Neomorphism 2.0 palette and Reduce Motion support.
+    Uses Coral/Orange (#eb5e38) during recording, Muted Indigo/Violet (#7c83e0) during voice edit
+    and formatting/transcription, and subtle recessed graphite bars in idle state.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(46)
+        self.setFixedHeight(38)
         self.num_bars = 36
-        self.bar_heights = [0.06] * self.num_bars
+        self.bar_heights = [0.08] * self.num_bars
         self.current_rms = 0.0
         self.target_rms = 0.0
+        self.current_state = "idle"
         self.is_recording = False
+        self.is_voice_edit = False
         self.is_transcribing = False
+        self.is_formatting = False
+        self.is_error = False
 
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self._on_anim_frame)
-        self.anim_timer.start(16)
+        self.anim_timer.start(24)
 
     def set_level(self, rms: float):
-        self.target_rms = min(1.0, rms * 3.2)
+        self.target_rms = min(1.0, rms * 3.4)
 
     def set_state(self, state: str):
+        self.current_state = state
         self.is_recording = (state == "recording")
-        self.is_transcribing = (state == "transcribing")
-        if not self.is_recording:
+        self.is_voice_edit = (state == "voice_edit")
+        self.is_transcribing = (state in ("transcribing", "formatting"))
+        self.is_formatting = (state == "formatting")
+        self.is_error = (state == "error")
+        if not (self.is_recording or self.is_voice_edit):
             self.target_rms = 0.0
+        self.update()
 
     def _on_anim_frame(self):
-        self.current_rms += (self.target_rms - self.current_rms) * 0.35
-        t = time.time() * 4.5
+        reduced = is_reduced_motion(config)
+        self.current_rms += (self.target_rms - self.current_rms) * (0.6 if reduced else 0.35)
+        t = 0.0 if reduced else time.time() * 4.2
 
         for i in range(self.num_bars):
             if self.is_recording:
-                wave = math.sin(t * 2.0 + i * 0.38) * 0.25 + 0.75
-                target_h = max(0.06, min(1.0, self.current_rms * wave * 1.25))
+                wave = 0.85 if reduced else (math.sin(t * 2.2 + i * 0.38) * 0.25 + 0.75)
+                target_h = max(0.10, min(1.0, self.current_rms * wave * 1.35))
+            elif self.is_voice_edit:
+                wave = 0.85 if reduced else (math.sin(t * 2.5 + i * 0.42) * 0.30 + 0.70)
+                target_h = max(0.10, min(1.0, self.current_rms * wave * 1.30))
+            elif self.is_formatting:
+                scan = 0.45 if reduced else ((math.sin(t * 2.8 - i * 0.32) + 1.0) * 0.5)
+                target_h = 0.10 + 0.42 * (scan ** 2)
             elif self.is_transcribing:
-                scan = (math.sin(t * 3.0 - i * 0.25) + 1.0) * 0.5
-                target_h = 0.08 + 0.40 * (scan ** 3)
+                scan = 0.45 if reduced else ((math.sin(t * 3.2 - i * 0.28) + 1.0) * 0.5)
+                target_h = 0.10 + 0.45 * (scan ** 3)
+            elif self.is_error:
+                target_h = 0.16 if reduced else (0.12 + 0.08 * math.sin(t * 6.0 + i * 0.5))
             else:
-                target_h = 0.05 + 0.03 * math.sin(t * 0.6 + i * 0.20)
+                target_h = 0.08 if reduced else (0.07 + 0.025 * math.sin(t * 0.5 + i * 0.22))
 
-            self.bar_heights[i] += (target_h - self.bar_heights[i]) * 0.40
+            self.bar_heights[i] += (target_h - self.bar_heights[i]) * (0.7 if reduced else 0.35)
 
         self.update()
 
@@ -661,26 +1418,38 @@ class HeroWaveformWidget(QWidget):
         h = self.height()
         center_y = h / 2.0
 
-        bar_w = 3.0
+        bar_w = 3.2
         gap = max(2.0, (w - (self.num_bars * bar_w)) / (self.num_bars + 1))
-        max_h = h * 0.74
+        max_h = h * 0.78
 
         for i in range(self.num_bars):
-            bh = max(2.5, self.bar_heights[i] * max_h)
+            bh = max(3.0, self.bar_heights[i] * max_h)
             bx = gap + i * (bar_w + gap)
             by = center_y - (bh / 2.0)
 
+            grad = QLinearGradient(bx, by, bx, by + bh)
             if self.is_recording:
-                painter.setBrush(QBrush(QColor("#38bdf8")))
+                grad.setColorAt(0.0, QColor("#f46d48"))
+                grad.setColorAt(1.0, QColor("#d14b27"))
+            elif self.is_voice_edit or self.is_formatting:
+                grad.setColorAt(0.0, QColor("#818cf8"))
+                grad.setColorAt(1.0, QColor("#4f46e5"))
             elif self.is_transcribing:
-                painter.setBrush(QBrush(QColor("#82828e")))
+                grad.setColorAt(0.0, QColor("#7c83e0"))
+                grad.setColorAt(1.0, QColor("#3d448a"))
+            elif self.is_error:
+                grad.setColorAt(0.0, QColor("#f87171"))
+                grad.setColorAt(1.0, QColor("#dc2626"))
             else:
-                painter.setBrush(QBrush(QColor("#24242c")))
+                grad.setColorAt(0.0, QColor("#262d42"))
+                grad.setColorAt(1.0, QColor("#181d2c"))
 
+            painter.setBrush(QBrush(grad))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.5, 1.5)
+            painter.drawRoundedRect(QRectF(bx, by, bar_w, bh), 1.6, 1.6)
 
         painter.end()
+
 
 
 # =========================================================================
@@ -692,11 +1461,12 @@ class DashboardWindow(QMainWindow):
     connection_test_signal = pyqtSignal(str, dict)  # (provider_name, result_dict)
     downloader_finished_signal = pyqtSignal(str, bool, str)  # (model_id, success, message)
 
-    def __init__(self, audio_recorder: AudioRecorder, stt_engine, ai_formatter, parent=None):
+    def __init__(self, audio_recorder: AudioRecorder, stt_engine, ai_formatter, parent=None, injector=None):
         super().__init__(parent)
         self.audio_recorder = audio_recorder
         self.stt_engine = stt_engine
         self.ai_formatter = ai_formatter
+        self.injector = injector
         self.gpu_monitor = GPUMonitor()
 
         # Dynamic Hardware Detection
@@ -705,8 +1475,9 @@ class DashboardWindow(QMainWindow):
         # Window Configuration
         self.setWindowTitle("Velodictum")
         self.setWindowIcon(create_app_icon(64))
-        self.resize(960, 740)
-        self.setMinimumSize(880, 640)
+        self.resize(1040, 760)
+        self.setMinimumSize(900, 640)
+        apply_window_backdrop(self)
 
         # State trackers
         self.total_dictations = 0
@@ -717,13 +1488,48 @@ class DashboardWindow(QMainWindow):
         self.profile_cards: Dict[str, ModelPresetCard] = {}
         self.tone_cards: Dict[str, TonePresetCard] = {}
         self.priority_cards: Dict[str, ModelPriorityCard] = {}
+        self.all_disclosure_sections: List[SettingsDisclosureSection] = []
+        self.sidebar_nav_buttons: List[QPushButton] = []
 
-        # Central Layout
+        # Root 2-Pane Dark Neomorphism 2.0 Layout (Deep Blue-Black #0b0d14 Canvas)
+        self._active_sidebar_item = 0
         central_widget = QWidget(self)
+        central_widget.setObjectName("neomorphic_canvas")
+        central_widget.setStyleSheet(f"QWidget#neomorphic_canvas {{ background-color: {ThemeColors.BG_WINDOW}; }}")
         self.setCentralWidget(central_widget)
-        self.main_layout = QVBoxLayout(central_widget)
-        self.main_layout.setContentsMargins(20, 16, 20, 16)
-        self.main_layout.setSpacing(12)
+
+        self.shell_layout = QHBoxLayout(central_widget)
+        self.shell_layout.setContentsMargins(16, 16, 16, 16)
+        self.shell_layout.setSpacing(18)
+
+        # Left Raised Neomorphic Sidebar Panel
+        self.sidebar_frame = QFrame()
+        self.sidebar_frame.setObjectName("fluent_sidebar")
+        self.sidebar_frame.setFixedWidth(220)
+        self.sidebar_frame.setStyleSheet(
+            f"QFrame#fluent_sidebar {{ "
+            f"  background-color: {ThemeColors.BG_SIDEBAR}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HERO}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_SHADOW_DARK}; "
+            f"  border-bottom: 2px solid {ThemeColors.BORDER_SHADOW_DARK}; "
+            f"  border-radius: {ThemeMetrics.RADIUS_CARD_LARGE}; "
+            f"}}"
+        )
+        self.sidebar_layout = QVBoxLayout(self.sidebar_frame)
+        self.sidebar_layout.setContentsMargins(16, 22, 16, 18)
+        self.sidebar_layout.setSpacing(8)
+
+        # Right Content Stage
+        self.content_stage = QFrame()
+        self.content_stage.setObjectName("fluent_stage")
+        self.content_stage.setStyleSheet("QFrame#fluent_stage { background: transparent; border: none; }")
+        self.main_layout = QVBoxLayout(self.content_stage)
+        self.main_layout.setContentsMargins(4, 2, 4, 2)
+        self.main_layout.setSpacing(16)
+
+        self.shell_layout.addWidget(self.sidebar_frame)
+        self.shell_layout.addWidget(self.content_stage, stretch=1)
 
         # Build UI
         self._build_header()
@@ -777,64 +1583,130 @@ class DashboardWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        apply_window_backdrop(int(self.winId()))
+        apply_window_backdrop(self)
+
+    def _toggle_ui_language(self):
+        cur_lang = get_current_language()
+        next_lang = "de" if cur_lang == "en" else "en"
+        config.system.ui_language = next_lang
+        set_current_language(next_lang)
+        config.save()
+        signals.language_changed.emit(next_lang)
 
     # =========================================================================
-    # Header & Status Row
+    # Dark Neomorphism 2.0 Sidebar Brand & Navigation (Studio, Diktate, Profile, Einstellungen)
     # =========================================================================
 
     def _build_header(self):
-        header_frame = QFrame()
-        header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(8)
+        # 1. Brand Header (Indigo Soundwave Icon + Velodictum)
+        brand_box = QWidget()
+        brand_row = QHBoxLayout(brand_box)
+        brand_row.setContentsMargins(6, 4, 4, 22)
+        brand_row.setSpacing(12)
 
-        # Left: Clean Brand Headline & Subdued System Telemetry
-        title_row = QHBoxLayout()
-        title_row.setSpacing(8)
+        icon_lbl = QLabel()
+        icon_lbl.setPixmap(_create_brand_wave_pixmap(28))
+        icon_lbl.setStyleSheet("background: transparent;")
+        brand_row.addWidget(icon_lbl)
 
         title = QLabel("Velodictum")
         title.setObjectName("brand_title")
-
-        tag = QLabel("Studio")
-        tag.setObjectName("brand_tag")
-
-        self.lbl_hw_badge = QLabel(self.hw_badge_text)
-        self.lbl_hw_badge.setStyleSheet("color: #555562; font-size: 11px; font-weight: 400; margin-left: 6px;")
-
-        title_row.addWidget(title)
-        title_row.addWidget(tag)
-        title_row.addWidget(self.lbl_hw_badge)
-        title_row.addStretch()
-
-        header_layout.addLayout(title_row)
-        header_layout.addStretch()
-
-        # Right: Privacy Shield Indicator & Refined Status Indicator
-        self.privacy_badge = QLabel("Offline-Schutz")
-        self.privacy_badge.setStyleSheet(
-            "background-color: rgba(16, 185, 129, 0.08); color: #10b981; font-weight: 500; font-size: 11px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.15);"
+        title.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_DISPLAY}; font-size: 18px; font-weight: 700; "
+            f"color: {ThemeColors.TEXT_PRIMARY}; letter-spacing: -0.3px; background: transparent;"
         )
-        self.privacy_badge.setVisible(getattr(config.system, "offline_privacy_mode", False))
-        header_layout.addWidget(self.privacy_badge)
+        brand_row.addWidget(title)
+        brand_row.addStretch()
+        self.sidebar_layout.addWidget(brand_box)
 
-        self.status_badge = QLabel(tr("ready"))
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(16, 185, 129, 0.08); color: #10b981; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.16);"
-        )
-        header_layout.addWidget(self.status_badge)
+        # 2. Navigation Buttons Container (Studio, Diktate, Profile, Einstellungen)
+        self.nav_container = QWidget()
+        self.nav_layout = QVBoxLayout(self.nav_container)
+        self.nav_layout.setContentsMargins(0, 0, 0, 0)
+        self.nav_layout.setSpacing(8)
+        self.sidebar_layout.addWidget(self.nav_container)
 
-        self.main_layout.addWidget(header_frame)
+        self.sidebar_layout.addStretch()
+
+    def _on_sidebar_nav_clicked(self, nav_idx: int):
+        """
+        Routes the 4 Dark Neomorphism 2.0 sidebar items (Studio, Diktate, Profile, Einstellungen)
+        while preserving the canonical 3-tab QTabWidget indices (0=Studio, 1=Library, 2=Settings).
+        """
+        self._active_sidebar_item = nav_idx
+        if nav_idx == 0:
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentIndex(0)
+        elif nav_idx == 1:
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentIndex(1)
+            if hasattr(self, "_switch_library_subview"):
+                self._switch_library_subview(0)
+        elif nav_idx == 2:
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentIndex(1)
+            if hasattr(self, "_switch_library_subview"):
+                self._switch_library_subview(2)
+        elif nav_idx == 3:
+            if hasattr(self, "tabs"):
+                self.tabs.setCurrentIndex(2)
+        self._update_sidebar_nav_styles_by_button(nav_idx)
+
+    def _switch_main_tab(self, index: int):
+        if hasattr(self, "tabs"):
+            self.tabs.setCurrentIndex(index)
+        self._update_sidebar_nav_styles(index)
+
+    def _update_sidebar_nav_styles(self, tab_idx: int):
+        if tab_idx == 0:
+            btn_idx = 0
+        elif tab_idx == 1:
+            btn_idx = 2 if getattr(self, "_active_sidebar_item", 1) == 2 else 1
+        else:
+            btn_idx = 3
+        self._active_sidebar_item = btn_idx
+        self._update_sidebar_nav_styles_by_button(btn_idx)
+
+    def _update_sidebar_nav_styles_by_button(self, active_btn_idx: int):
+        icon_kinds = ["studio", "dictations", "profiles", "settings"]
+        for i, btn in enumerate(getattr(self, "sidebar_nav_buttons", [])):
+            is_sel = (i == active_btn_idx)
+            btn.setChecked(is_sel)
+            kind = icon_kinds[i] if i < len(icon_kinds) else "studio"
+            btn.setIcon(_create_sidebar_icon(kind, "#ffffff" if is_sel else "#8b93a7", 18))
+            btn.setIconSize(QSize(18, 18))
+            if is_sel:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {ThemeColors.ACCENT_INDIGO_SURFACE}; color: #ffffff; "
+                    f"font-size: 13.5px; font-weight: 600; text-align: left; padding: 11px 16px; "
+                    f"border-radius: 11px; "
+                    f"border-top: 1px solid rgba(255, 255, 255, 0.22); "
+                    f"border-left: 1px solid {ThemeColors.ACCENT_INDIGO_BRIGHT}; "
+                    f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                    f"border-bottom: 2px solid {ThemeColors.BORDER_BOTTOM}; }} "
+                    f"QPushButton:focus {{ border: 2px solid {ThemeColors.BORDER_FOCUS}; }}"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"QPushButton {{ background-color: transparent; color: {ThemeColors.TEXT_MUTED}; "
+                    f"font-size: 13.5px; font-weight: 500; text-align: left; padding: 11px 16px; "
+                    f"border-radius: 11px; border: 1px solid transparent; }} "
+                    f"QPushButton:hover {{ background-color: {ThemeColors.BG_CARD_HOVER}; color: {ThemeColors.TEXT_PRIMARY}; "
+                    f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                    f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; }} "
+                    f"QPushButton:focus {{ border: 2px solid {ThemeColors.BORDER_FOCUS}; }}"
+                )
 
     # =========================================================================
-    # 3-Tab Architecture
+    # Tab Architecture & Sidebar Binding
     # =========================================================================
 
     def _build_tabs(self):
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("dashboard_tabs")
         self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setVisible(False)
+        self.tabs.setStyleSheet("QTabWidget::pane { border: none; background: transparent; }")
 
         self.tab_studio = QWidget()
         self.tab_library = QWidget()
@@ -844,6 +1716,28 @@ class DashboardWindow(QMainWindow):
         self.tabs.addTab(self.tab_library, tr("tab_library_combined"))
         self.tabs.addTab(self.tab_settings, tr("tab_settings"))
 
+        lang = get_current_language()
+        nav_items = [
+            ("studio", "  Studio", 0),
+            ("dictations", "  Diktate" if lang == "de" else "  Dictations", 1),
+            ("profiles", "  Profile" if lang == "de" else "  Profiles", 2),
+            ("settings", f"  {tr('tab_settings')}", 3),
+        ]
+        self.sidebar_nav_buttons.clear()
+        for kind, label_txt, nav_idx in nav_items:
+            btn = QPushButton(label_txt)
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setIcon(_create_sidebar_icon(kind, "#8b93a7", 18))
+            btn.setIconSize(QSize(18, 18))
+            btn.clicked.connect(lambda _, target=nav_idx: self._on_sidebar_nav_clicked(target))
+            self.nav_layout.addWidget(btn)
+            self.sidebar_nav_buttons.append(btn)
+
+        self.tabs.currentChanged.connect(self._update_sidebar_nav_styles)
+        self._update_sidebar_nav_styles_by_button(0)
+
         self._setup_studio_tab()
         self._setup_library_tab()
         self._setup_settings_tab()
@@ -851,232 +1745,432 @@ class DashboardWindow(QMainWindow):
         self.main_layout.addWidget(self.tabs)
 
     # =========================================================================
-    # TAB 1: STUDIO (Home & Live Command Center)
+    # TAB 1: STUDIO (Dark Neomorphism 2.0 Non-Scrolling 3-Zone Command Center)
     # =========================================================================
 
+    def _format_hotkey_parts(self, raw_key: str) -> List[str]:
+        """Splits a hotkey string like 'ctrl+space' or 'f8' into localized keycap labels."""
+        is_de = (get_current_language() == "de")
+        key_map_de = {
+            "ctrl": "Strg",
+            "control": "Strg",
+            "space": "Leertaste",
+            "alt": "Alt",
+            "shift": "Umschalt",
+            "cmd": "Win",
+            "win": "Win",
+            "caps_lock": "Feststelltaste",
+        }
+        key_map_en = {
+            "ctrl": "Ctrl",
+            "control": "Ctrl",
+            "space": "Space",
+            "alt": "Alt",
+            "shift": "Shift",
+            "cmd": "Win",
+            "win": "Win",
+            "caps_lock": "CapsLock",
+        }
+        mapping = key_map_de if is_de else key_map_en
+        tokens = [t.strip().lower() for t in (raw_key or "ctrl+space").split("+") if t.strip()]
+        if not tokens:
+            tokens = ["ctrl", "space"]
+        return [mapping.get(t, t.upper()) for t in tokens]
+
+    def _refresh_hero_keycaps(self):
+        """Rebuilds the tactile neomorphic keycap badges in the Studio recording centerpiece."""
+        if not hasattr(self, "hero_keycaps_layout"):
+            return
+        while self.hero_keycaps_layout.count() > 0:
+            item = self.hero_keycaps_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+
+        self.hero_keycaps_layout.addStretch(1)
+        parts = self._format_hotkey_parts(getattr(config.hotkey, "key", "ctrl+space"))
+        keycap_qss = get_keycap_qss("QLabel")
+        for idx, part in enumerate(parts):
+            if idx > 0:
+                plus_lbl = QLabel("+")
+                plus_lbl.setStyleSheet(f"color: {ThemeColors.TEXT_MUTED}; font-size: 12px; font-weight: 600; background: transparent; border: none;")
+                self.hero_keycaps_layout.addWidget(plus_lbl)
+            cap = QLabel(part)
+            cap.setStyleSheet(keycap_qss)
+            self.hero_keycaps_layout.addWidget(cap)
+        self.hero_keycaps_layout.addStretch(1)
+
+    def _on_hero_cta_clicked(self):
+        """Triggers or stops dictation when the user clicks the dominant Coral 'Diktat starten' button."""
+        is_rec = getattr(self.hero_waveform, "is_recording", False)
+        if is_rec:
+            signals.recording_stopped.emit()
+        else:
+            signals.recording_started.emit()
+
+    def _export_latest_text(self):
+        """Exports the latest dictation transcript to a .txt or .md file."""
+        txt = self.lbl_latest_text.text().strip('"\n\r ')
+        if not txt:
+            return
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Diktat exportieren" if get_current_language() == "de" else "Export Dictation",
+            "velodictum_diktat.txt",
+            "Text Files (*.txt);;Markdown Files (*.md);;All Files (*)",
+        )
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(txt + "\n")
+            except Exception as e:
+                print(f"[Export] Failed to save dictation: {e}")
+
+    def _open_latest_in_scratchpad(self):
+        """Transfers the latest dictation into Scratchpad and opens the Scratchpad window."""
+        self._on_open_scratchpad_clicked()
+        txt = self.lbl_latest_text.text().strip('"\n\r ')
+        if txt and hasattr(self, "scratchpad") and self.scratchpad:
+            cur = self.scratchpad.text_edit.toPlainText().strip()
+            combined = f"{cur}\n\n{txt}".strip() if cur else txt
+            self.scratchpad.text_edit.setPlainText(combined)
+            self.scratchpad._update_stats()
+
+    def _show_latest_dictation_menu(self):
+        """Opens the Dark Neomorphism 2.0 action menu from the '[•••]' button on the 'Letztes Diktat' card."""
+        is_de = (get_current_language() == "de")
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"QMenu {{ background-color: {ThemeColors.BG_POPOVER}; color: {ThemeColors.TEXT_PRIMARY}; "
+            f"border: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HERO}; border-radius: 10px; padding: 6px; }} "
+            f"QMenu::item {{ padding: 7px 14px; border-radius: 6px; font-size: 12px; font-weight: 500; }} "
+            f"QMenu::item:selected {{ background-color: {ThemeColors.ACCENT_INDIGO_SURFACE}; color: #ffffff; }} "
+            f"QMenu::separator {{ height: 1px; background: {ThemeColors.BORDER_SUBTLE}; margin: 4px 6px; }}"
+        )
+
+        act_copy = QAction("📋  " + tr("copy"), self)
+        act_copy.triggered.connect(self._copy_latest_text)
+        menu.addAction(act_copy)
+
+        act_export = QAction("💾  " + ("Als Datei exportieren (.txt / .md)..." if is_de else "Export to File (.txt / .md)..."), self)
+        act_export.triggered.connect(self._export_latest_text)
+        menu.addAction(act_export)
+
+        menu.addSeparator()
+
+        act_scratch = QAction("✦  " + ("Scratchpad öffnen" if is_de else "Open Scratchpad"), self)
+        act_scratch.triggered.connect(self._on_open_scratchpad_clicked)
+        menu.addAction(act_scratch)
+
+        act_to_scratch = QAction("📝  " + ("Im Scratchpad bearbeiten" if is_de else "Edit in Scratchpad"), self)
+        act_to_scratch.triggered.connect(self._open_latest_in_scratchpad)
+        menu.addAction(act_to_scratch)
+
+        act_hist = QAction("▤  " + ("Diktat-Verlauf & Bibliothek" if is_de else "Dictation History & Library"), self)
+        act_hist.triggered.connect(lambda: self._on_sidebar_nav_clicked(1))
+        menu.addAction(act_hist)
+
+        act_prof = QAction("◈  " + ("Betriebsmodus & Profile verwalten" if is_de else "Manage Mode & Profiles"), self)
+        act_prof.triggered.connect(lambda: self._on_sidebar_nav_clicked(2))
+        menu.addAction(act_prof)
+
+        menu.addSeparator()
+
+        # Engine, Whisper Provider & Profile summary item
+        eng_txt = self.pill_engine.text() if hasattr(self, "pill_engine") else ""
+        stt_txt = self.pill_profile.text() if hasattr(self, "pill_profile") else ""
+        hw_txt = self.lbl_hw_badge.text() if hasattr(self, "lbl_hw_badge") else ""
+        info_action = QAction(f"⚙  {stt_txt} · {eng_txt} ({hw_txt})", self)
+        info_action.triggered.connect(lambda: self._on_sidebar_nav_clicked(3))
+        menu.addAction(info_action)
+
+        if hasattr(self, "btn_latest_menu"):
+            pos = self.btn_latest_menu.mapToGlobal(QPoint(0, self.btn_latest_menu.height() + 4))
+            menu.exec(pos)
+
     def _setup_studio_tab(self):
+        """
+        Builds the viewport-fitted Dark Neomorphism 2.0 Studio Screen without QScrollArea
+        and without permanent operating mode or profile card grids:
+        - Top 2-Column Split: Dominant Central Recording Card + Right 'Letztes Diktat' Card
+        - Bottom Compact Status Bar: Glowing Ready Dot + Language Selector + Latency Indicator
+        """
         root_layout = QVBoxLayout(self.tab_studio)
         root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        root_layout.setSpacing(14)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(2, 6, 2, 8)
-        layout.setSpacing(12)
-
-        # 1. Hero Waveform Card
-        hero_card = QFrame()
-        hero_card.setObjectName("hero_card")
-        hc_layout = QVBoxLayout(hero_card)
-        hc_layout.setContentsMargins(18, 14, 18, 14)
-        hc_layout.setSpacing(8)
-
-        hero_top = QHBoxLayout()
-        self.lbl_hero_action = QLabel(tr("hero_status_ready"))
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #f1f1f4;")
-
-        is_toggle = (getattr(config.hotkey, "mode", "push_to_talk") == "toggle")
-        sub_text = tr("hero_sub_toggle", key=config.hotkey.key.upper()) if is_toggle else tr("hero_sub_ptt", key=config.hotkey.key.upper())
-        self.lbl_hero_sub = QLabel(sub_text)
-        self.lbl_hero_sub.setStyleSheet("font-size: 11.5px; color: #38bdf8; font-weight: 500;")
-
-        hero_top.addWidget(self.lbl_hero_action)
-        hero_top.addStretch()
-        hero_top.addWidget(self.lbl_hero_sub)
-        hc_layout.addLayout(hero_top)
-
-        # 36-Bar Spectrum Meter
+        # Keep off-stage HeroWaveformWidget instance for live audio/state telemetry contract
         self.hero_waveform = HeroWaveformWidget(self)
-        hc_layout.addWidget(self.hero_waveform)
+        self.hero_waveform.setVisible(False)
+        self.waveform_widget = self.hero_waveform
 
-        # Bottom info pills
-        hero_pills = QHBoxLayout()
-        hero_pills.setSpacing(6)
+        # ---------------------------------------------------------------------
+        # 1. Top 2-Column Split Stage (Viewport-fitted, No ScrollArea):
+        #    Left (stretch=54): Dominant Recording Centerpiece ("Diktat starten")
+        #    Right (stretch=46): Secondary Surface ("Letztes Diktat")
+        # ---------------------------------------------------------------------
+        self.studio_top_split = QHBoxLayout()
+        self.studio_top_split.setSpacing(18)
 
-        self.pill_hotkey = QLabel(tr("pill_hotkey", key=config.hotkey.key.upper()))
-        self.pill_hotkey.setStyleSheet(
-            "background-color: rgba(255, 255, 255, 0.035); color: #787884; font-size: 11px; font-weight: 500; "
-            "padding: 2px 7px; border-radius: 4px;"
+        # --- LEFT: Primary Recording Hero Panel ---
+        self.hero_card = QFrame()
+        self.hero_card.setObjectName("hero_card")
+        self.hero_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.hero_card.setMinimumHeight(250)
+        self.hero_card.setStyleSheet(
+            f"QFrame#hero_card {{ "
+            f"  background-color: {ThemeColors.BG_HERO_CARD}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HERO}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_SHADOW_DARK}; "
+            f"  border-bottom: 2px solid {ThemeColors.BORDER_SHADOW_DARK}; "
+            f"  border-radius: {ThemeMetrics.RADIUS_CARD_LARGE}; "
+            f"}}"
         )
+        hc_layout = QVBoxLayout(self.hero_card)
+        hc_layout.setContentsMargins(24, 24, 24, 24)
+        hc_layout.setSpacing(10)
 
-        self.pill_engine = QLabel(tr("pill_engine", engine=config.formatting.engine.upper()))
-        self.pill_engine.setStyleSheet(
-            "background-color: rgba(255, 255, 255, 0.035); color: #787884; font-size: 11px; font-weight: 500; "
-            "padding: 2px 7px; border-radius: 4px;"
+        hc_layout.addStretch(1)
+
+        # Dominant Circular Coral/Orange Record CTA Button inside Sunken Ring Socket
+        self.btn_hero_record_cta = NeomorphicRecordButton(self)
+        self.btn_hero_record_cta.setToolTip("Diktat starten / stoppen")
+        self.btn_hero_record_cta.clicked.connect(self._on_hero_cta_clicked)
+        hc_layout.addWidget(self.btn_hero_record_cta, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        hc_layout.addSpacing(8)
+
+        # Dominant Primary Action Title ("Diktat starten")
+        lang = get_current_language()
+        cta_headline = "Diktat starten" if lang == "de" else "Start Dictation"
+        self.lbl_hero_cta_title = QLabel(cta_headline)
+        self.lbl_hero_cta_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_hero_cta_title.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_DISPLAY}; font-size: 26px; font-weight: 700; "
+            f"color: {ThemeColors.TEXT_PRIMARY}; letter-spacing: -0.4px; background: transparent; border: none;"
         )
+        hc_layout.addWidget(self.lbl_hero_cta_title)
 
-        active_provider = getattr(config.whisper, "provider", "local")
-        if active_provider in ("grok", "groq"):
-            prof_str = "GROK AI"
-        elif active_provider == "openai":
-            prof_str = "OPENAI"
-        else:
-            prof_str = config.whisper.profile.upper()
+        hc_layout.addSpacing(2)
 
-        self.pill_profile = QLabel(tr("pill_stt", stt=prof_str))
-        self.pill_profile.setStyleSheet(
-            "background-color: rgba(255, 255, 255, 0.035); color: #787884; font-size: 11px; font-weight: 500; "
-            "padding: 2px 7px; border-radius: 4px;"
+        # Tactile Keycap Badges Row (e.g. [Strg] + [Leertaste])
+        self.hero_keycaps_layout = QHBoxLayout()
+        self.hero_keycaps_layout.setContentsMargins(0, 2, 0, 2)
+        self.hero_keycaps_layout.setSpacing(8)
+        hc_layout.addLayout(self.hero_keycaps_layout)
+        self._refresh_hero_keycaps()
+
+        hc_layout.addSpacing(4)
+
+        # Subtitle Instruction
+        sub_text = (
+            "Drücken, um mit der Spracherkennung zu beginnen."
+            if lang == "de"
+            else "Press to start speech recognition."
         )
-
-        self.btn_hero_scratchpad = QPushButton(tr("hero_scratchpad_btn"))
-        self.btn_hero_scratchpad.setStyleSheet(
-            "QPushButton { background-color: rgba(56, 189, 248, 0.08); color: #38bdf8; font-size: 10.5px; font-weight: 600; "
-            "padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.2); } "
-            "QPushButton:hover { background-color: rgba(56, 189, 248, 0.16); }"
+        self.lbl_hero_sub = QLabel(sub_text)
+        self.lbl_hero_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_hero_sub.setWordWrap(True)
+        self.lbl_hero_sub.setMinimumHeight(34)
+        self.lbl_hero_sub.setStyleSheet(
+            f"font-size: 12.5px; color: {ThemeColors.TEXT_MUTED}; font-weight: 400; background: transparent; border: none;"
         )
-        self.btn_hero_scratchpad.clicked.connect(self._on_open_scratchpad_clicked)
+        hc_layout.addWidget(self.lbl_hero_sub)
 
-        self.pill_latency = QLabel(tr("pill_latency", latency=280))
-        self.pill_latency.setStyleSheet(
-            "background-color: rgba(16, 185, 129, 0.06); color: #10b981; font-size: 11px; font-weight: 500; "
-            "padding: 2px 7px; border-radius: 4px;"
+        hc_layout.addStretch(1)
+
+        self.studio_top_split.addWidget(self.hero_card, stretch=54)
+
+        # --- RIGHT: Secondary Panel ("Letztes Diktat") ---
+        self.trans_card = QFrame()
+        self.trans_card.setObjectName("card")
+        self.trans_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.trans_card.setMinimumHeight(250)
+        self.trans_card.setStyleSheet(
+            f"QFrame#card {{ "
+            f"  background-color: {ThemeColors.BG_CARD}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HERO}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_SHADOW_DARK}; "
+            f"  border-bottom: 2px solid {ThemeColors.BORDER_SHADOW_DARK}; "
+            f"  border-radius: {ThemeMetrics.RADIUS_CARD_LARGE}; "
+            f"}}"
         )
-
-        hero_pills.addWidget(self.pill_hotkey)
-        hero_pills.addWidget(self.pill_engine)
-        hero_pills.addWidget(self.pill_profile)
-        hero_pills.addWidget(self.btn_hero_scratchpad)
-        hero_pills.addStretch()
-        hero_pills.addWidget(self.pill_latency)
-        hc_layout.addLayout(hero_pills)
-
-        layout.addWidget(hero_card)
-
-        # 2. Latest Transcription Output Card
-        trans_card = QFrame()
-        trans_card.setObjectName("card")
-        tc_layout = QVBoxLayout(trans_card)
-        tc_layout.setContentsMargins(18, 14, 18, 14)
-        tc_layout.setSpacing(8)
+        tc_layout = QVBoxLayout(self.trans_card)
+        tc_layout.setContentsMargins(22, 20, 22, 20)
+        tc_layout.setSpacing(14)
 
         tc_top = QHBoxLayout()
-        self.tc_title = QLabel(tr("latest_dictation_title"))
+        tc_top.setSpacing(8)
+        self.tc_title = QLabel("Letztes Diktat" if lang == "de" else "Latest Dictation")
         self.tc_title.setObjectName("section_title")
+        self.tc_title.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_DISPLAY}; font-size: 18px; font-weight: 700; "
+            f"color: {ThemeColors.TEXT_PRIMARY}; letter-spacing: -0.2px; background: transparent; border: none;"
+        )
 
-        self.lbl_latest_stats = QLabel(tr("latest_dictation_ready"))
-        self.lbl_latest_stats.setStyleSheet("color: #555562; font-size: 11px; font-weight: 400;")
-
-        self.btn_copy_latest = QPushButton(tr("copy"))
-        self.btn_copy_latest.setObjectName("btn_secondary")
-        self.btn_copy_latest.clicked.connect(self._copy_latest_text)
+        # Tactile Neomorphic Overflow Action Button ("[•••]")
+        self.btn_latest_menu = QPushButton("•••")
+        self.btn_latest_menu.setObjectName("btn_latest_menu")
+        self.btn_latest_menu.setFixedSize(36, 32)
+        self.btn_latest_menu.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_latest_menu.setToolTip("Aktionen: Kopieren, Exportieren, Scratchpad, Details")
+        self.btn_latest_menu.setStyleSheet(
+            f"QPushButton#btn_latest_menu {{ "
+            f"  background-color: {ThemeColors.BG_ELEVATED}; color: {ThemeColors.TEXT_SECONDARY}; "
+            f"  font-size: 12px; font-weight: 700; border-radius: 9px; padding: 0px; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"  border-bottom: 2px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"}} "
+            f"QPushButton#btn_latest_menu:hover {{ "
+            f"  background-color: {ThemeColors.BG_ELEVATED_HOVER}; color: {ThemeColors.TEXT_PRIMARY}; "
+            f"}}"
+        )
+        self.btn_latest_menu.clicked.connect(self._show_latest_dictation_menu)
 
         tc_top.addWidget(self.tc_title)
         tc_top.addStretch()
-        tc_top.addWidget(self.lbl_latest_stats)
-        tc_top.addWidget(self.btn_copy_latest)
+        tc_top.addWidget(self.btn_latest_menu)
         tc_layout.addLayout(tc_top)
 
-        self.lbl_latest_text = QLabel(tr("latest_dictation_empty"))
-        self.lbl_latest_text.setWordWrap(True)
-        self.lbl_latest_text.setMinimumHeight(38)
-        self.lbl_latest_text.setStyleSheet(
-            "font-size: 13px; color: #787884; line-height: 145%; padding: 2px 0;"
+        # Unified Sunken Neomorphic Well for Latest Dictation Text + Waveform + Timestamps
+        self.latest_text_well = QFrame()
+        self.latest_text_well.setObjectName("sunken_well")
+        self.latest_text_well.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.latest_text_well.setStyleSheet(get_sunken_qss("16px", "QFrame#sunken_well"))
+        well_layout = QVBoxLayout(self.latest_text_well)
+        well_layout.setContentsMargins(18, 16, 18, 14)
+        well_layout.setSpacing(12)
+
+        default_dict_de = (
+            "Das ist ein kurzer Test meines Diktats. Die Spracherkennung funktioniert "
+            "sehr gut und spart mir im Alltag viel Zeit. So kann ich meine Gedanken "
+            "schnell und einfach festhalten."
         )
-        tc_layout.addWidget(self.lbl_latest_text)
+        default_dict_en = (
+            "This is a short test of my dictation. Speech recognition works very well "
+            "and saves me a lot of time every day. This way I can capture my thoughts "
+            "quickly and easily."
+        )
+        self.lbl_latest_text = QLabel(default_dict_de if lang == "de" else default_dict_en)
+        self.lbl_latest_text.setWordWrap(True)
+        self.lbl_latest_text.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_latest_text.setMinimumHeight(60)
+        self.lbl_latest_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.lbl_latest_text.setStyleSheet(
+            f"font-size: 13.5px; color: {ThemeColors.TEXT_SECONDARY}; line-height: 155%; background: transparent; border: none;"
+        )
+        well_layout.addWidget(self.lbl_latest_text, stretch=1)
 
-        layout.addWidget(trans_card)
+        # Subtle horizontal divider line inside the well
+        well_div = QFrame()
+        well_div.setFrameShape(QFrame.Shape.HLine)
+        well_div.setFixedHeight(1)
+        well_div.setStyleSheet("background-color: rgba(255, 255, 255, 0.05); border: none;")
+        well_layout.addWidget(well_div)
 
-        # 3. Tier 1: Operating Mode (Flow vs. Raw Bypass)
-        mode_card = QFrame()
-        mode_card.setObjectName("card")
-        mc_layout = QVBoxLayout(mode_card)
-        mc_layout.setContentsMargins(18, 14, 18, 14)
-        mc_layout.setSpacing(8)
+        # Violet/Indigo Audio Waveform + Timestamps row below
+        self.latest_wave_well = QWidget()
+        self.latest_wave_well.setStyleSheet("background: transparent; border: none;")
+        wave_box = QVBoxLayout(self.latest_wave_well)
+        wave_box.setContentsMargins(0, 2, 0, 0)
+        wave_box.setSpacing(6)
 
-        self.mc_title = QLabel(tr("section_mode_title"))
-        self.mc_title.setObjectName("section_title")
-        mc_layout.addWidget(self.mc_title)
+        self.latest_static_wave = StaticDictationWaveformWidget(self)
+        wave_box.addWidget(self.latest_static_wave)
 
-        grid_mode = QGridLayout()
-        grid_mode.setSpacing(8)
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        self.lbl_latest_time_start = QLabel("00:00")
+        self.lbl_latest_time_start.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_MONO}; font-size: 11px; color: {ThemeColors.TEXT_DIM}; background: transparent;"
+        )
+        self.lbl_latest_time_end = QLabel("00:12")
+        self.lbl_latest_time_end.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_MONO}; font-size: 11px; color: {ThemeColors.TEXT_DIM}; background: transparent;"
+        )
+        time_row.addWidget(self.lbl_latest_time_start)
+        time_row.addStretch()
+        time_row.addWidget(self.lbl_latest_time_end)
+        wave_box.addLayout(time_row)
 
-        active_mode = getattr(config.formatting, "mode", "flow")
-        if active_mode not in ("flow", "raw"):
-            active_mode = "flow"
+        well_layout.addWidget(self.latest_wave_well)
+        tc_layout.addWidget(self.latest_text_well, stretch=1)
 
-        for idx, (m_key, m_info) in enumerate(MODES.items()):
-            title_text = tr("mode_flow_title") if m_key == "flow" else tr("mode_raw_title")
-            desc_text = tr("mode_flow_desc") if m_key == "flow" else tr("mode_raw_desc")
-            card = ModePresetCard(m_key, title_text, desc_text, self)
-            card.set_selected(m_key == active_mode)
-            card.clicked.connect(self._on_mode_clicked)
+        self.studio_top_split.addWidget(self.trans_card, stretch=46)
+        root_layout.addLayout(self.studio_top_split, stretch=1)
 
-            self.mode_cards[m_key] = card
-            grid_mode.addWidget(card, 0, idx)
+        # ---------------------------------------------------------------------
+        # 2. Compact Neomorphic Bottom Status Bar (Ready Dot, Language, Latency)
+        # ---------------------------------------------------------------------
+        self.studio_status_bar = QFrame()
+        self.studio_status_bar.setObjectName("studio_status_bar")
+        self.studio_status_bar.setFixedHeight(48)
+        self.studio_status_bar.setStyleSheet(
+            f"QFrame#studio_status_bar {{ "
+            f"  background-color: {ThemeColors.BG_STATUS_BAR}; "
+            f"  border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+            f"  border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"  border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"  border-bottom: 2px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"  border-radius: 14px; "
+            f"}}"
+        )
+        sb_layout = QHBoxLayout(self.studio_status_bar)
+        sb_layout.setContentsMargins(18, 6, 18, 6)
+        sb_layout.setSpacing(12)
 
-        mc_layout.addLayout(grid_mode)
-        layout.addWidget(mode_card)
+        # Glowing Mint/Green Readiness Dot + Label ("Bereit")
+        self.status_dot = StatusGlowDotWidget(self)
+        sb_layout.addWidget(self.status_dot)
 
-        # 4. Tier 2: Tone & Style Profiles (for Intelligent Flow)
-        self.tone_section_card = QFrame()
-        self.tone_section_card.setObjectName("card")
-        tc_layout_tone = QVBoxLayout(self.tone_section_card)
-        tc_layout_tone.setContentsMargins(18, 14, 18, 14)
-        tc_layout_tone.setSpacing(8)
+        self.status_badge = QLabel(tr("ready"))
+        self.status_badge.setStyleSheet(
+            f"color: {ThemeColors.TEXT_PRIMARY}; font-size: 12.5px; font-weight: 600; background: transparent; border: none;"
+        )
+        sb_layout.addWidget(self.status_badge)
 
-        tone_top = QHBoxLayout()
-        self.tone_title = QLabel(tr("tone_section_title"))
-        self.tone_title.setObjectName("section_title")
-        self.lbl_tone_status = QLabel(tr("tone_status_active") if active_mode == "flow" else tr("tone_status_inactive"))
-        self.lbl_tone_status.setStyleSheet("color: #787884; font-size: 11px;")
-        tone_top.addWidget(self.tone_title)
-        tone_top.addStretch()
-        tone_top.addWidget(self.lbl_tone_status)
-        tc_layout_tone.addLayout(tone_top)
+        sb_layout.addSpacing(8)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.VLine)
+        sep1.setFixedSize(1, 18)
+        sep1.setStyleSheet("background-color: rgba(255, 255, 255, 0.10); border: none;")
+        sb_layout.addWidget(sep1)
+        sb_layout.addSpacing(4)
 
-        grid_tone = QGridLayout()
-        grid_tone.setSpacing(8)
+        # Language Selector ("🌐 Deutsch ⌄")
+        lang_label = "🌐 Deutsch (DE) ▾" if lang == "de" else "🌐 English (EN) ▾"
+        self.btn_lang_toggle = LanguageSelectorButton(lang_label, self)
+        self.btn_lang_toggle.setObjectName("btn_lang_toggle")
+        self.btn_lang_toggle.setToolTip("Switch Interface Language (DE / EN)")
+        self.btn_lang_toggle.clicked.connect(self._toggle_ui_language)
+        sb_layout.addWidget(self.btn_lang_toggle)
 
-        active_tone = getattr(config.formatting, "tone", "default")
-        tone_order = ["default", "formal_sie", "informal_du", "concise", "academic", "latex"]
-        tone_trans = {
-            "default": ("tone_default_title", "tone_default_desc"),
-            "formal_sie": ("tone_formal_title", "tone_formal_desc"),
-            "informal_du": ("tone_informal_title", "tone_informal_desc"),
-            "concise": ("tone_concise_title", "tone_concise_desc"),
-            "academic": ("tone_academic_title", "tone_academic_desc"),
-            "latex": ("tone_latex_title", "tone_latex_desc"),
-        }
+        sb_layout.addStretch(1)
 
-        for idx, t_key in enumerate(tone_order):
-            if t_key not in TONE_PROFILES:
-                continue
-            t_info = TONE_PROFILES[t_key]
-            row = idx // 3
-            col = idx % 3
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.VLine)
+        sep2.setFixedSize(1, 18)
+        sep2.setStyleSheet("background-color: rgba(255, 255, 255, 0.10); border: none;")
+        sb_layout.addWidget(sep2)
+        sb_layout.addSpacing(4)
 
-            title_k, desc_k = tone_trans.get(t_key, ("tone_default_title", "tone_default_desc"))
-            t_card = TonePresetCard(
-                key=t_key,
-                title=tr(title_k),
-                tag=t_info.get("tag", "STYLE"),
-                sub=tr(desc_k),
-                parent=self,
-            )
-            t_card.set_selected(t_key == active_tone)
-            t_card.clicked.connect(self._on_tone_preset_clicked)
+        # Right-aligned Latency Indicator with 5-bar Indigo Waveform Icon ("0,4 s Latenz")
+        lat_default = "0,4 s Latenz" if lang == "de" else "0.4 s Latency"
+        self.pill_latency = LatencyWaveBadgeButton(lat_default, self)
+        self.pill_latency.setToolTip("System-, Engine- & Profil-Details anzeigen")
+        self.pill_latency.clicked.connect(self._show_latest_dictation_menu)
+        sb_layout.addWidget(self.pill_latency)
 
-            self.tone_cards[t_key] = t_card
-            grid_tone.addWidget(t_card, row, col)
-
-        tc_layout_tone.addLayout(grid_tone)
-        layout.addWidget(self.tone_section_card)
-
-        # Sync Tone Card interactivity with active mode
-        self.tone_section_card.setEnabled(active_mode == "flow")
-
-        layout.addStretch()
-        scroll.setWidget(container)
-        root_layout.addWidget(scroll)
+        root_layout.addWidget(self.studio_status_bar)
 
     # =========================================================================
-    # TAB 2: LIBRARY & HISTORY (2-Spalten Split View mit Sub-Selektor)
+    # TAB 2: LIBRARY, PROFILES & HISTORY (Diktate & Profilverwaltung)
     # =========================================================================
 
     def _setup_library_tab(self):
@@ -1084,38 +2178,57 @@ class DashboardWindow(QMainWindow):
         tab_layout.setContentsMargins(0, 8, 0, 0)
         tab_layout.setSpacing(12)
 
-        # Left Column (45%): Library Sub-Tabs (Fachwörterbuch / Sprach-Makros / App-Profile)
+        # Left Column (50%): Library & Profile Sub-Tabs (Fachwörterbuch / Sprach-Makros / Profile)
         left_card = QFrame()
         left_card.setObjectName("card")
         lc_layout = QVBoxLayout(left_card)
         lc_layout.setContentsMargins(16, 14, 16, 14)
         lc_layout.setSpacing(10)
 
-        # Segmented Sub-View Switcher
+        # Segmented Sub-View Switcher + Quick Scratchpad Access
         sub_nav = QHBoxLayout()
         sub_nav.setSpacing(4)
+
+        pill_style = (
+            f"QPushButton {{ background: transparent; color: {ThemeColors.TEXT_MUTED}; "
+            f"font-weight: 600; font-size: 11.5px; border: none; border-radius: 6px; padding: 5px 12px; }} "
+            f"QPushButton:checked {{ background-color: {ThemeColors.BG_CARD_ACTIVE}; color: {ThemeColors.TEXT_PRIMARY}; "
+            f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HERO}; border: 1px solid rgba(99, 102, 241, 0.45); }} "
+            f"QPushButton:hover:!checked {{ color: #ffffff; background-color: rgba(255, 255, 255, 0.05); }}"
+        )
 
         self.btn_sub_vocab = QPushButton(tr("tab_vocabulary"))
         self.btn_sub_vocab.setCheckable(True)
         self.btn_sub_vocab.setChecked(True)
+        self.btn_sub_vocab.setStyleSheet(pill_style)
         self.btn_sub_vocab.clicked.connect(lambda: self._switch_library_subview(0))
 
         self.btn_sub_snippets = QPushButton(tr("tab_snippets"))
         self.btn_sub_snippets.setCheckable(True)
+        self.btn_sub_snippets.setStyleSheet(pill_style)
         self.btn_sub_snippets.clicked.connect(lambda: self._switch_library_subview(1))
 
         self.btn_sub_apps = QPushButton(tr("tab_profiles"))
         self.btn_sub_apps.setCheckable(True)
+        self.btn_sub_apps.setStyleSheet(pill_style)
         self.btn_sub_apps.clicked.connect(lambda: self._switch_library_subview(2))
+
+        self.btn_hero_scratchpad = QPushButton(tr("hero_scratchpad_btn"))
+        self.btn_hero_scratchpad.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_hero_scratchpad.setObjectName("btn_secondary")
+        self.btn_hero_scratchpad.clicked.connect(self._on_open_scratchpad_clicked)
+        self.btn_sidebar_scratchpad = self.btn_hero_scratchpad
 
         sub_nav.addWidget(self.btn_sub_vocab)
         sub_nav.addWidget(self.btn_sub_snippets)
         sub_nav.addWidget(self.btn_sub_apps)
+        sub_nav.addStretch()
+        sub_nav.addWidget(self.btn_hero_scratchpad)
         lc_layout.addLayout(sub_nav)
 
         self.lib_stacked = QStackedWidget()
 
-        # View 0: Custom Vocabulary (Clean list styling, no boxed fields)
+        # View 0: Custom Vocabulary
         v_widget = QWidget()
         vw_layout = QVBoxLayout(v_widget)
         vw_layout.setContentsMargins(0, 0, 0, 0)
@@ -1198,48 +2311,217 @@ class DashboardWindow(QMainWindow):
 
         self.lib_stacked.addWidget(snip_widget)
 
-        # View 2: App-Profile
+        # View 2: Profile Management (Operating Mode + Tone Profiles + Engine/STT Info + App-Profiles)
         app_widget = QWidget()
         aw_layout = QVBoxLayout(app_widget)
         aw_layout.setContentsMargins(0, 0, 0, 0)
         aw_layout.setSpacing(8)
 
+        prof_scroll = QScrollArea()
+        prof_scroll.setWidgetResizable(True)
+        prof_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        prof_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        prof_scroll_content = QWidget()
+        psc_layout = QVBoxLayout(prof_scroll_content)
+        psc_layout.setContentsMargins(2, 2, 4, 8)
+        psc_layout.setSpacing(14)
+
+        # A. Engine, Whisper/Provider & Hardware Status Summary Strip
+        sys_info_frame = QFrame()
+        sys_info_frame.setStyleSheet(get_sunken_qss("10px", "QFrame"))
+        sys_info_layout = QHBoxLayout(sys_info_frame)
+        sys_info_layout.setContentsMargins(10, 8, 10, 8)
+        sys_info_layout.setSpacing(8)
+
+        pill_style_info = (
+            f"background-color: {ThemeColors.BG_CARD}; color: {ThemeColors.TEXT_SECONDARY}; "
+            f"font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 6px; "
+            f"border: 1px solid {ThemeColors.BORDER_SUBTLE};"
+        )
+        self.pill_hotkey = QLabel(tr("pill_hotkey", key=config.hotkey.key.upper()))
+        self.pill_hotkey.setStyleSheet(pill_style_info)
+
+        self.pill_engine = QLabel(tr("pill_engine", engine=config.formatting.engine.upper()))
+        self.pill_engine.setStyleSheet(pill_style_info)
+
+        active_provider = getattr(config.whisper, "provider", "local")
+        if active_provider in ("grok", "groq"):
+            prof_str = "GROK AI"
+        elif active_provider == "openai":
+            prof_str = "OPENAI"
+        else:
+            prof_str = config.whisper.profile.upper()
+
+        self.pill_profile = QLabel(tr("pill_stt", stt=prof_str))
+        self.pill_profile.setStyleSheet(pill_style_info)
+
+        self.lbl_hw_badge = QLabel(self.hw_badge_text)
+        self.lbl_hw_badge.setStyleSheet(f"color: {ThemeColors.TEXT_MUTED}; font-size: 10.5px; font-weight: 500; background: transparent;")
+
+        self.privacy_badge = QLabel(tr("privacy_badge_text"))
+        self.privacy_badge.setStyleSheet(
+            f"background-color: {ThemeColors.SUCCESS_MUTED}; color: {ThemeColors.SUCCESS}; "
+            f"font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 6px; "
+            f"border: 1px solid {ThemeColors.SUCCESS_BORDER};"
+        )
+        self.privacy_badge.setVisible(getattr(config.system, "offline_privacy_mode", False))
+
+        sys_info_layout.addWidget(self.pill_profile)
+        sys_info_layout.addWidget(self.pill_engine)
+        sys_info_layout.addWidget(self.pill_hotkey)
+        sys_info_layout.addStretch()
+        sys_info_layout.addWidget(self.lbl_hw_badge)
+        sys_info_layout.addWidget(self.privacy_badge)
+        psc_layout.addWidget(sys_info_frame)
+
+        # B. Operating Mode Selection ("Flow-Modus" vs. "Rohdiktat")
+        self.mode_card = QFrame()
+        self.mode_card.setStyleSheet("QFrame { background: transparent; border: none; }")
+        mc_layout = QVBoxLayout(self.mode_card)
+        mc_layout.setContentsMargins(0, 0, 0, 0)
+        mc_layout.setSpacing(8)
+
+        self.mc_title = QLabel(tr("section_mode_title"))
+        self.mc_title.setObjectName("section_title")
+        mc_layout.addWidget(self.mc_title)
+
+        grid_mode = QGridLayout()
+        grid_mode.setSpacing(10)
+
+        active_mode = getattr(config.formatting, "mode", "flow")
+        if active_mode not in ("flow", "raw"):
+            active_mode = "flow"
+
+        for idx, (m_key, m_info) in enumerate(MODES.items()):
+            title_text = tr("mode_flow_title") if m_key == "flow" else tr("mode_raw_title")
+            desc_text = tr("mode_flow_desc") if m_key == "flow" else tr("mode_raw_desc")
+            card = ModePresetCard(m_key, title_text, desc_text, self)
+            card.set_selected(m_key == active_mode)
+            card.clicked.connect(self._on_mode_clicked)
+
+            self.mode_cards[m_key] = card
+            grid_mode.addWidget(card, 0, idx)
+
+        mc_layout.addLayout(grid_mode)
+        psc_layout.addWidget(self.mode_card)
+
+        # C. Tone & Style Profiles Grid (6 Presets)
+        self.tone_section_card = QFrame()
+        self.tone_section_card.setStyleSheet("QFrame { background: transparent; border: none; }")
+        tc_layout_tone = QVBoxLayout(self.tone_section_card)
+        tc_layout_tone.setContentsMargins(0, 2, 0, 0)
+        tc_layout_tone.setSpacing(8)
+
+        tone_top = QHBoxLayout()
+        self.tone_title = QLabel(tr("tone_section_title"))
+        self.tone_title.setObjectName("section_title")
+        self.lbl_tone_status = QLabel(tr("tone_status_active") if active_mode == "flow" else tr("tone_status_inactive"))
+        self.lbl_tone_status.setStyleSheet(
+            f"color: {ThemeColors.ACCENT_INDIGO_BRIGHT}; font-size: 11px; font-weight: 600; "
+            f"background-color: {ThemeColors.ACCENT_INDIGO_MUTED}; padding: 2px 9px; border-radius: 6px; "
+            f"border: 1px solid {ThemeColors.ACCENT_INDIGO_BORDER};"
+        )
+        tone_top.addWidget(self.tone_title)
+        tone_top.addStretch()
+        tone_top.addWidget(self.lbl_tone_status)
+        tc_layout_tone.addLayout(tone_top)
+
+        grid_tone = QGridLayout()
+        grid_tone.setSpacing(8)
+
+        active_tone = getattr(config.formatting, "tone", "default")
+        tone_order = ["default", "formal_sie", "informal_du", "concise", "academic", "latex"]
+        tone_trans = {
+            "default": ("tone_default_title", "tone_default_desc"),
+            "formal_sie": ("tone_formal_title", "tone_formal_desc"),
+            "informal_du": ("tone_informal_title", "tone_informal_desc"),
+            "concise": ("tone_concise_title", "tone_concise_desc"),
+            "academic": ("tone_academic_title", "tone_academic_desc"),
+            "latex": ("tone_latex_title", "tone_latex_desc"),
+        }
+
+        for idx, t_key in enumerate(tone_order):
+            if t_key not in TONE_PROFILES:
+                continue
+            t_info = TONE_PROFILES[t_key]
+            row = idx // 2
+            col = idx % 2
+
+            title_k, desc_k = tone_trans.get(t_key, ("tone_default_title", "tone_default_desc"))
+            t_card = TonePresetCard(
+                key=t_key,
+                title=tr(title_k),
+                tag=t_info.get("tag", "STYLE"),
+                sub=tr(desc_k),
+                parent=self,
+            )
+            t_card.set_selected(t_key == active_tone)
+            t_card.clicked.connect(self._on_tone_preset_clicked)
+
+            self.tone_cards[t_key] = t_card
+            grid_tone.addWidget(t_card, row, col)
+
+        tc_layout_tone.addLayout(grid_tone)
+        psc_layout.addWidget(self.tone_section_card)
+        self.tone_section_card.setEnabled(active_mode == "flow")
+
+        # D. App-Profile Context Rules
         self.lbl_app_info = QLabel(tr("app_rules_info"))
         self.lbl_app_info.setStyleSheet("color: #71717a; font-size: 11px;")
-        aw_layout.addWidget(self.lbl_app_info)
+        psc_layout.addWidget(self.lbl_app_info)
 
-        app_scroll = QScrollArea()
-        app_scroll.setWidgetResizable(True)
-        app_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.app_container = QWidget()
         self.app_list_layout = QVBoxLayout(self.app_container)
         self.app_list_layout.setContentsMargins(0, 2, 0, 0)
         self.app_list_layout.setSpacing(3)
         self.app_list_layout.addStretch()
-        app_scroll.setWidget(self.app_container)
-        aw_layout.addWidget(app_scroll, stretch=1)
+        psc_layout.addWidget(self.app_container)
+
+        psc_layout.addStretch()
+        prof_scroll.setWidget(prof_scroll_content)
+        aw_layout.addWidget(prof_scroll, stretch=1)
 
         self.lib_stacked.addWidget(app_widget)
 
         lc_layout.addWidget(self.lib_stacked)
-        tab_layout.addWidget(left_card, stretch=2)
+        tab_layout.addWidget(left_card, stretch=5)
 
-        # Right Column (55%): Dictation History with Quiet Empty State
-        hist_card = QFrame()
-        hist_card.setObjectName("card")
-        hc_layout = QVBoxLayout(hist_card)
+        # Right Column (50%): Dictation History + Quick Latest Actions
+        self.lib_hist_card = QFrame()
+        self.lib_hist_card.setObjectName("card")
+        hc_layout = QVBoxLayout(self.lib_hist_card)
         hc_layout.setContentsMargins(16, 14, 16, 14)
-        hc_layout.setSpacing(10)
+        hc_layout.setSpacing(8)
 
         h_head = QHBoxLayout()
         self.lbl_history_title = QLabel(tr("history_title"))
         self.lbl_history_title.setObjectName("section_title")
+
+        self.btn_copy_latest = QPushButton(tr("copy"))
+        self.btn_copy_latest.setObjectName("btn_secondary")
+        self.btn_copy_latest.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy_latest.clicked.connect(self._copy_latest_text)
+
         self.lbl_hist_count = QLabel(tr("history_entries_count", count=0))
         self.lbl_hist_count.setStyleSheet("color: #555562; font-size: 11px; font-weight: 400;")
+
         h_head.addWidget(self.lbl_history_title)
         h_head.addStretch()
+        h_head.addWidget(self.btn_copy_latest)
         h_head.addWidget(self.lbl_hist_count)
         hc_layout.addLayout(h_head)
+
+        h_status_row = QHBoxLayout()
+        self.lbl_hero_action = QLabel(tr("hero_status_ready"))
+        self.lbl_hero_action.setStyleSheet(f"color: {ThemeColors.TEXT_MUTED}; font-size: 11px; font-weight: 600;")
+
+        self.lbl_latest_stats = QLabel(tr("latest_dictation_ready"))
+        self.lbl_latest_stats.setStyleSheet(f"color: {ThemeColors.TEXT_DIM}; font-size: 11px;")
+
+        h_status_row.addWidget(self.lbl_hero_action)
+        h_status_row.addStretch()
+        h_status_row.addWidget(self.lbl_latest_stats)
+        hc_layout.addLayout(h_status_row)
 
         h_scroll = QScrollArea()
         h_scroll.setWidgetResizable(True)
@@ -1272,7 +2554,7 @@ class DashboardWindow(QMainWindow):
         h_scroll.setWidget(self.hist_container)
         hc_layout.addWidget(h_scroll, stretch=1)
 
-        tab_layout.addWidget(hist_card, stretch=3)
+        tab_layout.addWidget(self.lib_hist_card, stretch=5)
 
         self._refresh_vocab_list()
         self._refresh_snippets_list()
@@ -1283,6 +2565,11 @@ class DashboardWindow(QMainWindow):
         self.btn_sub_snippets.setChecked(idx == 1)
         self.btn_sub_apps.setChecked(idx == 2)
         self.lib_stacked.setCurrentIndex(idx)
+        if hasattr(self, "lib_hist_card"):
+            self.lib_hist_card.setVisible(idx != 2)
+        if hasattr(self, "tabs") and self.tabs.currentIndex() == 1:
+            self._active_sidebar_item = 2 if idx == 2 else 1
+            self._update_sidebar_nav_styles_by_button(self._active_sidebar_item)
 
     # =========================================================================
     # TAB 3: SETTINGS (System-Konfiguration & Hardware)
@@ -1293,6 +2580,7 @@ class DashboardWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
+        self.all_disclosure_sections = []
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(2, 6, 2, 6)
@@ -1540,11 +2828,21 @@ class DashboardWindow(QMainWindow):
         sep_aud2.setStyleSheet("color: rgba(255, 255, 255, 0.06); margin: 6px 0;")
         aud_layout.addWidget(sep_aud2)
 
-        # 5. Wireless Mobile LAN Bridge
+        # 5. Wireless Mobile LAN Bridge (Progressive Disclosure Section)
+        mob_active = getattr(config.mobile_bridge, "enabled", False)
+        self.sub_mob_bridge = SettingsDisclosureSection(
+            tr("lbl_mobile_bridge"),
+            summary=tr("lbl_mobile_active") if mob_active else tr("lbl_mobile_inactive"),
+            is_expanded=False,
+            parent=self.card_audio,
+        )
+        self.all_disclosure_sections.append(self.sub_mob_bridge)
+        disc_audio_layout = self.sub_mob_bridge.body_layout
+
         self.chk_mobile_bridge = QCheckBox(tr("lbl_mobile_bridge"))
-        self.chk_mobile_bridge.setChecked(getattr(config.mobile_bridge, "enabled", False))
+        self.chk_mobile_bridge.setChecked(mob_active)
         self.chk_mobile_bridge.toggled.connect(self._on_mobile_bridge_toggled)
-        aud_layout.addWidget(self.chk_mobile_bridge)
+        disc_audio_layout.addWidget(self.chk_mobile_bridge)
 
         self.mob_options_widget = QWidget()
         mob_opt_layout = QVBoxLayout(self.mob_options_widget)
@@ -1581,8 +2879,8 @@ class DashboardWindow(QMainWindow):
         row_mob_url.addWidget(self.btn_rotate_mob_token)
         mob_opt_layout.addLayout(row_mob_url)
 
-        self.lbl_mobile_status = QLabel(tr("lbl_mobile_active") if getattr(config.mobile_bridge, "enabled", False) else tr("lbl_mobile_inactive"))
-        self.lbl_mobile_status.setStyleSheet("font-size: 11px; color: #10b981;" if getattr(config.mobile_bridge, "enabled", False) else "font-size: 11px; color: #71717a;")
+        self.lbl_mobile_status = QLabel(tr("lbl_mobile_active") if mob_active else tr("lbl_mobile_inactive"))
+        self.lbl_mobile_status.setStyleSheet("font-size: 11px; color: #10b981;" if mob_active else "font-size: 11px; color: #71717a;")
         mob_opt_layout.addWidget(self.lbl_mobile_status)
 
         self.lbl_mob_hint = QLabel(tr("lbl_mobile_hint"))
@@ -1591,8 +2889,10 @@ class DashboardWindow(QMainWindow):
         mob_opt_layout.addWidget(self.lbl_mob_hint)
 
         self.chk_mobile_bridge.toggled.connect(self.mob_options_widget.setEnabled)
-        self.mob_options_widget.setEnabled(getattr(config.mobile_bridge, "enabled", False))
-        aud_layout.addWidget(self.mob_options_widget)
+        self.mob_options_widget.setEnabled(mob_active)
+        disc_audio_layout.addWidget(self.mob_options_widget)
+
+        aud_layout.addWidget(self.sub_mob_bridge)
 
         layout.addWidget(self.card_audio)
 
@@ -1754,10 +3054,15 @@ class DashboardWindow(QMainWindow):
 
         lm_layout.addLayout(p_grid)
 
-        # Whisper Model Storage & Downloader Frame
-        self.model_storage_frame = QFrame()
-        self.model_storage_frame.setStyleSheet("background-color: #141419; border: 1px solid #23232b; border-radius: 8px;")
-        ms_layout = QVBoxLayout(self.model_storage_frame)
+        # Whisper Model Storage & Downloader Frame (Progressive Disclosure Section)
+        self.model_storage_frame = SettingsDisclosureSection(
+            tr("lbl_models_storage"),
+            summary="",
+            is_expanded=False,
+            parent=self.card_stt,
+        )
+        self.all_disclosure_sections.append(self.model_storage_frame)
+        ms_layout = self.model_storage_frame.body_layout
         ms_layout.setContentsMargins(12, 10, 12, 10)
         ms_layout.setSpacing(8)
 
@@ -1937,6 +3242,25 @@ class DashboardWindow(QMainWindow):
 
         u_layout.addLayout(grid_prio)
 
+        # Sub-Model Quick-Chips Bar for Active Tier
+        self.sub_model_bar = QWidget()
+        self.sub_model_bar.setStyleSheet("background: transparent; margin-top: 3px; margin-bottom: 3px;")
+        sub_m_layout = QHBoxLayout(self.sub_model_bar)
+        sub_m_layout.setContentsMargins(2, 0, 2, 0)
+        sub_m_layout.setSpacing(8)
+
+        self.lbl_sub_models_title = QLabel(tr("lbl_tier_models_available"))
+        self.lbl_sub_models_title.setStyleSheet("font-size: 11px; font-weight: 600; color: #a1a1aa; min-width: 130px;")
+        sub_m_layout.addWidget(self.lbl_sub_models_title)
+
+        self.sub_model_chips_container = QWidget()
+        self.chips_h_layout = QHBoxLayout(self.sub_model_chips_container)
+        self.chips_h_layout.setContentsMargins(0, 0, 0, 0)
+        self.chips_h_layout.setSpacing(6)
+        sub_m_layout.addWidget(self.sub_model_chips_container, stretch=1)
+
+        u_layout.addWidget(self.sub_model_bar)
+
         # Collapsible Details Panel
         self.model_details_frame = QFrame()
         self.model_details_frame.setStyleSheet(
@@ -1950,9 +3274,10 @@ class DashboardWindow(QMainWindow):
 
         self.lbl_d_m_title = QLabel(tr("lbl_det_model_title"))
         self.lbl_d_m_title.setStyleSheet("font-size: 11px; color: #787884; font-weight: 500;")
-        cur_u_model = getattr(config.formatting, "model", "qwen/qwen-2.5-72b-instruct")
+        cur_u_model = getattr(config.formatting, "model", "google/gemini-2.5-flash")
         self.lbl_det_model = QLabel(cur_u_model)
         self.lbl_det_model.setStyleSheet("font-size: 11px; color: #ffffff; font-weight: 600;")
+        self._update_sub_model_chips(get_tier_for_model(cur_u_model) or "speed", cur_u_model)
 
         self.lbl_d_lat_title = QLabel(tr("lbl_det_lat_title"))
         self.lbl_d_lat_title.setStyleSheet("font-size: 11px; color: #787884; font-weight: 500;")
@@ -2011,14 +3336,15 @@ class DashboardWindow(QMainWindow):
 
         u_layout.addWidget(self.model_details_frame)
 
-        # Custom / Catalog Frame
-        self.custom_catalog_frame = QFrame()
-        self.custom_catalog_frame.setStyleSheet(
-            "QFrame { background-color: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255, 255, 255, 0.05); "
-            "border-radius: 6px; }"
+        # Custom / Catalog Frame (Progressive Disclosure Section)
+        self.custom_catalog_frame = SettingsDisclosureSection(
+            tr("btn_toggle_custom_catalog"),
+            summary="OpenRouter / Custom Endpunkte",
+            is_expanded=False,
+            parent=self.card_fmt,
         )
-        self.custom_catalog_frame.setVisible(False)
-        cat_layout = QVBoxLayout(self.custom_catalog_frame)
+        self.all_disclosure_sections.append(self.custom_catalog_frame)
+        cat_layout = self.custom_catalog_frame.body_layout
         cat_layout.setContentsMargins(10, 8, 10, 8)
         cat_layout.setSpacing(8)
 
@@ -2027,7 +3353,7 @@ class DashboardWindow(QMainWindow):
         self.lbl_u_model.setStyleSheet("font-weight: 500; min-width: 150px; color: #9d9da8; font-size: 11.5px;")
         self.combo_u_model = QComboBox()
         self.combo_u_model.setEditable(True)
-        self.combo_u_model.setEditText(cur_u_model)
+        self._populate_curated_models_in_combo()
         self.combo_u_model.currentTextChanged.connect(self._on_u_model_changed)
 
         self.btn_u_fetch_models = QPushButton(tr("btn_fetch_models"))
@@ -2099,6 +3425,7 @@ class DashboardWindow(QMainWindow):
         self.btn_toggle_custom_catalog.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_toggle_custom_catalog.setStyleSheet("font-size: 11px; padding: 4px 10px;")
         self.btn_toggle_custom_catalog.clicked.connect(self._toggle_custom_catalog)
+        self.custom_catalog_frame.toggled.connect(lambda exp: self.btn_toggle_custom_catalog.setText(tr("btn_hide_custom_catalog") if exp else tr("btn_toggle_custom_catalog")))
         u_layout.addWidget(self.btn_toggle_custom_catalog)
 
         lc_layout.addWidget(self.universal_container)
@@ -2348,23 +3675,25 @@ class DashboardWindow(QMainWindow):
         row_cp.addWidget(self.input_custom_prompt, stretch=1)
         lc_layout.addLayout(row_cp)
 
-        # Collapsible Advanced Formatting Options
+        # Collapsible Advanced Formatting Options (Progressive Disclosure Section)
+        self.adv_formatting_frame = SettingsDisclosureSection(
+            tr("btn_toggle_adv_formatting"),
+            summary="7 Automations-Regeln",
+            is_expanded=False,
+            parent=self.card_fmt,
+        )
+        self.all_disclosure_sections.append(self.adv_formatting_frame)
+        adv_layout = self.adv_formatting_frame.body_layout
+        adv_layout.setContentsMargins(10, 8, 10, 8)
+        adv_layout.setSpacing(8)
+
         self.btn_toggle_adv_formatting = QPushButton(tr("btn_toggle_adv_formatting"))
         self.btn_toggle_adv_formatting.setObjectName("btn_secondary")
         self.btn_toggle_adv_formatting.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_toggle_adv_formatting.setStyleSheet("font-size: 11px; padding: 4px 10px; margin-top: 4px;")
         self.btn_toggle_adv_formatting.clicked.connect(self._toggle_advanced_formatting)
+        self.adv_formatting_frame.toggled.connect(lambda exp: self.btn_toggle_adv_formatting.setText(tr("btn_hide_adv_formatting") if exp else tr("btn_toggle_adv_formatting")))
         lc_layout.addWidget(self.btn_toggle_adv_formatting)
-
-        self.adv_formatting_frame = QFrame()
-        self.adv_formatting_frame.setStyleSheet(
-            "QFrame { background-color: rgba(255, 255, 255, 0.015); border: 1px solid rgba(255, 255, 255, 0.05); "
-            "border-radius: 6px; }"
-        )
-        self.adv_formatting_frame.setVisible(False)
-        adv_layout = QVBoxLayout(self.adv_formatting_frame)
-        adv_layout.setContentsMargins(10, 8, 10, 8)
-        adv_layout.setSpacing(8)
 
         self.chk_filler = QCheckBox(tr("chk_filler"))
         self.chk_filler.setChecked(config.injection.clean_filler_words)
@@ -2551,9 +3880,15 @@ class DashboardWindow(QMainWindow):
         self.hud_pos_mem_widget.setVisible(pos_idx == 0)
         hopt_layout.addWidget(self.hud_pos_mem_widget)
 
-        hud_sliders_frame = QFrame()
-        hud_sliders_frame.setStyleSheet("background-color: #141419; border: 1px solid #23232b; border-radius: 8px;")
-        hud_sliders_layout = QVBoxLayout(hud_sliders_frame)
+        cur_lang_hud = getattr(config.system, "ui_language", "en")
+        self.hud_sliders_frame = SettingsDisclosureSection(
+            "HUD-Physik & Glas-Schieberegler" if cur_lang_hud == "de" else "HUD Physics & Glass Sliders",
+            summary=f"Deckkraft {getattr(config.hud, 'opacity_percent', 78)}% · Bounce {getattr(config.hud, 'bounce_intensity', 50)}% · Skalierung {getattr(config.hud, 'scale_percent', 100)}%",
+            is_expanded=False,
+            parent=self.card_hud,
+        )
+        self.all_disclosure_sections.append(self.hud_sliders_frame)
+        hud_sliders_layout = self.hud_sliders_frame.body_layout
         hud_sliders_layout.setContentsMargins(12, 10, 12, 10)
         hud_sliders_layout.setSpacing(10)
 
@@ -2599,7 +3934,7 @@ class DashboardWindow(QMainWindow):
         row_scale.addWidget(self.lbl_hud_scale_val)
         hud_sliders_layout.addLayout(row_scale)
 
-        hopt_layout.addWidget(hud_sliders_frame)
+        hopt_layout.addWidget(self.hud_sliders_frame)
 
         self.chk_hud_enable.toggled.connect(self.hud_options_widget.setEnabled)
         self.hud_options_widget.setEnabled(getattr(config.hud, "enabled", True))
@@ -2637,14 +3972,28 @@ class DashboardWindow(QMainWindow):
         self.chk_privacy_shield.toggled.connect(self._on_privacy_shield_toggled)
         adv_card_layout.addWidget(self.chk_privacy_shield)
 
+        # Developer & Diagnostics Disclosure Section (Progressive Disclosure)
+        self.dev_options_frame = SettingsDisclosureSection(
+            "Entwickler- & Diagnoseoptionen" if cur_lang == "de" else "Developer Options & Diagnostics",
+            summary="Hardware-Diagnose & Zwischenablage" if cur_lang == "de" else "Hardware Diagnostics & Clipboard",
+            is_expanded=False,
+            parent=self.card_adv,
+        )
+        self.all_disclosure_sections.append(self.dev_options_frame)
+        dev_layout = self.dev_options_frame.body_layout
+        dev_layout.setContentsMargins(10, 8, 10, 8)
+        dev_layout.setSpacing(8)
+
         self.chk_restore_clip = QCheckBox(tr("lbl_restore_clipboard"))
-        self.chk_restore_clip.setChecked(getattr(config.injection, "restore_clipboard", True))
-        self.chk_restore_clip.toggled.connect(lambda v: setattr(config.injection, "restore_clipboard", v) or config.save())
-        adv_card_layout.addWidget(self.chk_restore_clip)
+        self.chk_restore_clip.setChecked(getattr(config.injection, "restore_clipboard", False))
+        self.chk_restore_clip.toggled.connect(self._on_restore_clip_toggled)
+        dev_layout.addWidget(self.chk_restore_clip)
 
         self.lbl_diag = QLabel(tr("lbl_hardware_diag", hw=self.hw_badge_text))
         self.lbl_diag.setStyleSheet("font-size: 11px; color: #555562; margin-top: 4px;")
-        adv_card_layout.addWidget(self.lbl_diag)
+        dev_layout.addWidget(self.lbl_diag)
+
+        adv_card_layout.addWidget(self.dev_options_frame)
 
         layout.addWidget(self.card_adv)
 
@@ -2819,21 +4168,41 @@ class DashboardWindow(QMainWindow):
         """Dynamically update all user-facing labels, buttons, cards, placeholders and dropdown options across the dashboard."""
         if lang_code:
             set_current_language(lang_code)
+        cur_lang = get_current_language()
         self.setWindowTitle(tr("app_title"))
         if hasattr(self, "tabs"):
             self.tabs.setTabText(0, tr("tab_dashboard"))
             self.tabs.setTabText(1, tr("tab_library_combined"))
             self.tabs.setTabText(2, tr("tab_settings"))
+        if hasattr(self, "sidebar_nav_buttons"):
+            if len(self.sidebar_nav_buttons) >= 4:
+                self.sidebar_nav_buttons[0].setText("  Studio")
+                self.sidebar_nav_buttons[1].setText("  Diktate" if cur_lang == "de" else "  Dictations")
+                self.sidebar_nav_buttons[2].setText("  Profile" if cur_lang == "de" else "  Profiles")
+                self.sidebar_nav_buttons[3].setText(f"  {tr('tab_settings')}")
+            elif len(self.sidebar_nav_buttons) >= 3:
+                self.sidebar_nav_buttons[0].setText(f"  {tr('tab_dashboard')}")
+                self.sidebar_nav_buttons[1].setText(f"  {tr('tab_library_combined')}")
+                self.sidebar_nav_buttons[2].setText(f"  {tr('tab_settings')}")
 
         # Studio Tab Hero & Status
+        if hasattr(self, "lbl_hero_cta_title") and not getattr(self.hero_waveform, "is_recording", False):
+            self.lbl_hero_cta_title.setText("Diktat starten" if cur_lang == "de" else "Start Dictation")
+
+        self._refresh_hero_keycaps()
+
         if hasattr(self, "lbl_hero_action") and not getattr(self.hero_waveform, "is_recording", False):
             self.lbl_hero_action.setText(tr("hero_status_ready"))
-            is_toggle = (getattr(config.hotkey, "mode", "push_to_talk") == "toggle")
-            k = config.hotkey.key.upper()
-            self.lbl_hero_sub.setText(tr("hero_sub_toggle", key=k) if is_toggle else tr("hero_sub_ptt", key=k))
+            self.lbl_hero_sub.setText(
+                "Drücken, um mit der Spracherkennung zu beginnen."
+                if cur_lang == "de"
+                else "Press to start speech recognition."
+            )
 
         if hasattr(self, "status_badge") and not getattr(self.hero_waveform, "is_recording", False):
             self.status_badge.setText(tr("ready"))
+        if hasattr(self, "status_dot") and not getattr(self.hero_waveform, "is_recording", False):
+            self.status_dot.set_color("#34d399")
 
         if hasattr(self, "privacy_badge"):
             self.privacy_badge.setText(tr("privacy_badge_text"))
@@ -2843,11 +4212,11 @@ class DashboardWindow(QMainWindow):
 
         # Studio Latest Transcription Card
         if hasattr(self, "tc_title"):
-            self.tc_title.setText(tr("latest_dictation_title"))
+            self.tc_title.setText("Letztes Diktat" if cur_lang == "de" else "Latest Dictation")
         if hasattr(self, "btn_copy_latest"):
             self.btn_copy_latest.setText(tr("copy"))
 
-        # Studio Section Titles & Mode Cards
+        # Profile Tab Section Titles & Mode Cards
         if hasattr(self, "mc_title"):
             self.mc_title.setText(tr("section_mode_title"))
         if hasattr(self, "mode_cards"):
@@ -2858,7 +4227,7 @@ class DashboardWindow(QMainWindow):
                 self.mode_cards["raw"].lbl_title.setText(tr("mode_raw_title"))
                 self.mode_cards["raw"].lbl_sub.setText(tr("mode_raw_desc"))
 
-        # Studio Tone Section & Cards
+        # Profile Tab Tone Section & Cards
         if hasattr(self, "tone_title"):
             self.tone_title.setText(tr("tone_section_title"))
         if hasattr(self, "lbl_tone_status"):
@@ -3170,6 +4539,9 @@ class DashboardWindow(QMainWindow):
         if hasattr(self, "card_prio_quality") and hasattr(self.card_prio_quality, "update_texts"):
             self.card_prio_quality.update_texts(tr("prio_quality_title"), tr("prio_quality_badge"), tr("prio_quality_desc"))
 
+        if hasattr(self, "lbl_sub_models_title"):
+            self.lbl_sub_models_title.setText(tr("lbl_tier_models_available"))
+
         if hasattr(self, "lbl_d_m_title"):
             self.lbl_d_m_title.setText(tr("lbl_det_model_title"))
         if hasattr(self, "lbl_d_lat_title"):
@@ -3370,6 +4742,35 @@ class DashboardWindow(QMainWindow):
                 self.combo_ui_lang.setCurrentIndex(idx)
                 self.combo_ui_lang.blockSignals(False)
 
+        # Retranslate Progressive Disclosure Sections
+        lang = lang_code or get_current_language()
+        if hasattr(self, "sub_mob_bridge") and hasattr(self.sub_mob_bridge, "set_title"):
+            self.sub_mob_bridge.set_title(tr("lbl_mobile_bridge"))
+            mob_on = getattr(config.mobile_bridge, "enabled", False)
+            self.sub_mob_bridge.set_summary(tr("lbl_mobile_active") if mob_on else tr("lbl_mobile_inactive"))
+
+        if hasattr(self, "model_storage_frame") and hasattr(self.model_storage_frame, "set_title"):
+            self.model_storage_frame.set_title(tr("lbl_models_storage"))
+
+        if hasattr(self, "custom_catalog_frame") and hasattr(self.custom_catalog_frame, "set_title"):
+            self.custom_catalog_frame.set_title(tr("btn_toggle_custom_catalog"))
+
+        if hasattr(self, "adv_formatting_frame") and hasattr(self.adv_formatting_frame, "set_title"):
+            self.adv_formatting_frame.set_title(tr("btn_toggle_adv_formatting"))
+
+        if hasattr(self, "hud_sliders_frame") and hasattr(self.hud_sliders_frame, "set_title"):
+            self.hud_sliders_frame.set_title("HUD-Physik & Glas-Schieberegler" if lang == "de" else "HUD Physics & Glass Sliders")
+
+        if hasattr(self, "dev_options_frame") and hasattr(self.dev_options_frame, "set_title"):
+            self.dev_options_frame.set_title("Entwickler- & Diagnoseoptionen" if lang == "de" else "Developer Options & Diagnostics")
+            if hasattr(self.dev_options_frame, "set_summary"):
+                self.dev_options_frame.set_summary("Hardware-Diagnose & Zwischenablage" if lang == "de" else "Hardware Diagnostics & Clipboard")
+
+        if hasattr(self, "btn_lang_toggle"):
+            lang_lbl = "🌐 Deutsch (DE) ▾" if get_current_language() == "de" else "🌐 English (EN) ▾"
+            self.btn_lang_toggle.setText(lang_lbl)
+            self.btn_lang_toggle.update()
+
         self._update_settings_summaries()
         self._update_hw_badge_string()
 
@@ -3383,27 +4784,35 @@ class DashboardWindow(QMainWindow):
 
     def _on_rec_started(self):
         self._stop_mic_test()
-        self.status_badge.setText(f"● {tr('listening')}")
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(239, 68, 68, 0.08); color: #ef4444; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(239, 68, 68, 0.16);"
-        )
+        if hasattr(self, "status_dot"):
+            self.status_dot.set_color("#ff6b47")
+        self.status_badge.setText(tr("listening"))
         self.lbl_hero_action.setText(tr("hero_status_recording"))
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #ef4444;")
+        self.lbl_hero_action.setStyleSheet(f"font-size: 11px; font-weight: 700; color: {ThemeColors.ACCENT_CORAL_HOVER};")
+        if hasattr(self, "lbl_hero_cta_title"):
+            self.lbl_hero_cta_title.setText(tr("listening"))
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("recording")
         self.hero_waveform.set_state("recording")
 
     def _on_rec_stopped(self):
         self.hero_waveform.set_state("idle")
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("idle")
+        if hasattr(self, "lbl_hero_cta_title"):
+            self.lbl_hero_cta_title.setText("Diktat starten" if get_current_language() == "de" else "Start Dictation")
 
     def _on_rec_cancelled(self):
         self.hero_waveform.set_state("idle")
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("idle")
+        if hasattr(self, "lbl_hero_cta_title"):
+            self.lbl_hero_cta_title.setText("Diktat starten" if get_current_language() == "de" else "Start Dictation")
+        if hasattr(self, "status_dot"):
+            self.status_dot.set_color("#34d399")
         self.status_badge.setText(tr("ready"))
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(16, 185, 129, 0.08); color: #10b981; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.16);"
-        )
         self.lbl_hero_action.setText(tr("hero_status_ready"))
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #f1f1f4;")
+        self.lbl_hero_action.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ThemeColors.TEXT_MUTED};")
 
     def _on_audio_level(self, rms: float):
         self.hero_waveform.set_level(rms)
@@ -3411,65 +4820,84 @@ class DashboardWindow(QMainWindow):
             self.calib_meter.update_level(rms)
 
     def _on_transcribe_started(self):
+        if hasattr(self, "status_dot"):
+            self.status_dot.set_color("#818cf8")
         self.status_badge.setText(tr("processing"))
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(56, 189, 248, 0.08); color: #38bdf8; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.16);"
-        )
         self.lbl_hero_action.setText(tr("hero_status_processing"))
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #38bdf8;")
+        self.lbl_hero_action.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ThemeColors.ACCENT_INDIGO_BRIGHT};")
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("transcribing")
         self.hero_waveform.set_state("transcribing")
 
     def _on_formatting_started(self):
+        if hasattr(self, "status_dot"):
+            self.status_dot.set_color("#a78bfa")
         self.status_badge.setText(tr("formatting"))
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(192, 132, 252, 0.08); color: #c084fc; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(192, 132, 252, 0.16);"
-        )
         self.lbl_hero_action.setText(tr("formatting"))
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #c084fc;")
+        self.lbl_hero_action.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ThemeColors.PURPLE};")
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("formatting")
         self.hero_waveform.set_state("transcribing")
 
     def _on_transcribe_completed(self, data: Dict):
+        if hasattr(self, "status_dot"):
+            self.status_dot.set_color("#34d399")
         self.status_badge.setText(tr("ready"))
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(16, 185, 129, 0.08); color: #10b981; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.16);"
-        )
         self.lbl_hero_action.setText(tr("injected"))
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #10b981;")
+        self.lbl_hero_action.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ThemeColors.SUCCESS};")
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("idle")
+        if hasattr(self, "lbl_hero_cta_title"):
+            self.lbl_hero_cta_title.setText("Diktat starten" if get_current_language() == "de" else "Start Dictation")
         self.hero_waveform.set_state("idle")
 
         text = data.get("text", "")
         latency = data.get("latency", 0.0)
 
         if text.strip():
-            self.lbl_latest_text.setText(f'"{text.strip()}"')
-            self.lbl_latest_text.setStyleSheet("font-size: 13px; color: #eeeeef; font-weight: 400; line-height: 145%; padding: 2px 0;")
-            
+            self.lbl_latest_text.setText(text.strip())
+            self.lbl_latest_text.setStyleSheet(
+                f"font-size: 13.5px; color: {ThemeColors.TEXT_SECONDARY}; font-weight: 400; line-height: 155%; background: transparent;"
+            )
+
             words = len(text.strip().split())
             word_label = "words" if get_current_language() == "en" else "Wörter"
-            lat_label = "Latency" if get_current_language() == "en" else "Latenz"
             self.lbl_latest_stats.setText(f"{words} {word_label} · {latency:.2f}s")
-            self.pill_latency.setText(f"{lat_label}: {latency:.2f}s")
+            if get_current_language() == "de":
+                lat_fmt = f"{latency:.1f}".replace(".", ",")
+                self.pill_latency.setText(f"{lat_fmt} s Latenz")
+            else:
+                self.pill_latency.setText(f"{latency:.1f} s Latency")
+            self.pill_latency.update()
+            if hasattr(self, "lbl_latest_time_end"):
+                est_secs = max(1, min(59, int(round(words * 0.42))))
+                self.lbl_latest_time_end.setText(f"00:{est_secs:02d}")
             self._add_to_history(text, latency)
 
     def _on_transcribe_failed(self, err_msg: str):
+        if hasattr(self, "status_dot"):
+            self.status_dot.set_color("#ef4444")
         self.status_badge.setText(tr("transcription_failed"))
-        self.status_badge.setStyleSheet(
-            "background-color: rgba(239, 68, 68, 0.08); color: #ef4444; font-weight: 500; font-size: 11.5px; "
-            "padding: 3px 8px; border-radius: 4px; border: 1px solid rgba(239, 68, 68, 0.16);"
-        )
         self.lbl_hero_action.setText(f"{tr('transcription_failed')}: {err_msg}")
-        self.lbl_hero_action.setStyleSheet("font-size: 13.5px; font-weight: 600; color: #ef4444;")
+        self.lbl_hero_action.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {ThemeColors.ERROR};")
+        if hasattr(self, "btn_hero_record_cta"):
+            self.btn_hero_record_cta.set_dictation_state("idle")
+        if hasattr(self, "lbl_hero_cta_title"):
+            self.lbl_hero_cta_title.setText("Diktat starten" if get_current_language() == "de" else "Start Dictation")
         self.hero_waveform.set_state("idle")
 
     def _copy_latest_text(self):
         txt = self.lbl_latest_text.text().strip('"\n\r ')
         if txt and not txt.startswith("Press ") and not txt.startswith("Drücke "):
-            pyperclip.copy(txt)
-            self.btn_copy_latest.setText(tr("copied"))
-            QTimer.singleShot(1500, lambda: self.btn_copy_latest.setText(tr("copy")))
+            if safe_clipboard_copy(txt):
+                self.btn_copy_latest.setText(tr("copied"))
+                QTimer.singleShot(1500, lambda: self.btn_copy_latest.setText(tr("copy")))
+
+    def _on_restore_clip_toggled(self, checked: bool):
+        config.injection.restore_clipboard = checked
+        config.save()
+        if hasattr(self, "injector") and self.injector:
+            self.injector.restore_clipboard = checked
 
     def _on_mode_clicked(self, mode_key: str):
         config.formatting.mode = mode_key
@@ -3556,6 +4984,7 @@ class DashboardWindow(QMainWindow):
             config.hotkey.key = combo_str
             config.save()
             self.pill_hotkey.setText(tr("pill_hotkey", key=combo_str.upper()))
+            self._refresh_hero_keycaps()
             if getattr(config.hotkey, "mode", "push_to_talk") == "toggle":
                 self.lbl_hero_sub.setText(tr("hero_sub_toggle", key=combo_str.upper()))
             else:
@@ -3665,6 +5094,127 @@ class DashboardWindow(QMainWindow):
         self.ai_formatter.api_key = cleaned if cleaned else None
         self._update_detected_provider_badge()
 
+    def _populate_curated_models_in_combo(self):
+        """Populates combo_u_model with the curated 3-tier models grouped by tier."""
+        self.combo_u_model.blockSignals(True)
+        self.combo_u_model.clear()
+
+        tiers = MODEL_TIERS
+        tier_icons = [
+            ("speed", tr("prio_speed_title") + " (< 250 ms)"),
+            ("balanced", tr("prio_balanced_title") + " (300 - 500 ms)"),
+            ("quality", tr("prio_quality_title") + " (1 - 2 s)"),
+        ]
+
+        for t_key, t_title in tier_icons:
+            t_data = tiers.get(t_key, {})
+            model_list = t_data.get("models", [])
+            if model_list:
+                self.combo_u_model.addItem(f"--- {t_title} ---", "")
+                for m_id in model_list:
+                    spec = CURATED_MODELS_SPECS.get(m_id, {})
+                    m_name = spec.get("name", m_id)
+                    self.combo_u_model.addItem(f"{m_id} — {m_name}", m_id)
+
+        cur_m = getattr(config.formatting, "model", "google/gemini-2.5-flash")
+        matched = -1
+        for idx in range(self.combo_u_model.count()):
+            if self.combo_u_model.itemData(idx) == cur_m:
+                matched = idx
+                break
+        if matched >= 0:
+            self.combo_u_model.setCurrentIndex(matched)
+        else:
+            self.combo_u_model.setEditText(cur_m)
+
+        self.combo_u_model.blockSignals(False)
+
+    def _update_sub_model_chips(self, tier_key: str, active_model_id: str):
+        """Updates the visible sub-model pill chips for the active tier."""
+        if not hasattr(self, "chips_h_layout"):
+            return
+
+        while self.chips_h_layout.count() > 0:
+            item = self.chips_h_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        tier_data = MODEL_TIERS.get(tier_key, {})
+        model_list = tier_data.get("models", [])
+        if not model_list:
+            model_list = MODEL_TIERS.get("speed", {}).get("models", [])
+
+        chip_short_names = {
+            "google/gemini-2.5-flash": "Gemini 2.5 Flash",
+            "google/gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
+            "openai/gpt-4o-mini": "GPT-4o-mini",
+            "meta-llama/llama-3.3-70b-instruct": "Llama 3.3 70B",
+            "deepseek/deepseek-chat": "DeepSeek V3",
+            "mistralai/mistral-small-24b-instruct-2501": "Mistral Small 3",
+            "anthropic/claude-3-haiku": "Claude 3 Haiku",
+            "qwen/qwen-2.5-72b-instruct": "Qwen 2.5 72B",
+            "openai/gpt-4o": "OpenAI GPT-4o",
+            "anthropic/claude-sonnet-4": "Claude Sonnet 4",
+        }
+
+        chip_short_prices = {
+            "google/gemini-2.5-flash": "$0.30/1M",
+            "google/gemini-2.5-flash-lite": "$0.10/1M",
+            "openai/gpt-4o-mini": "$0.15/1M",
+            "meta-llama/llama-3.3-70b-instruct": "$0.71/1M",
+            "deepseek/deepseek-chat": "$0.26/1M",
+            "mistralai/mistral-small-24b-instruct-2501": "$0.07/1M",
+            "anthropic/claude-3-haiku": "$0.25/1M",
+            "qwen/qwen-2.5-72b-instruct": "$0.36/1M",
+            "openai/gpt-4o": "$2.50/1M",
+            "anthropic/claude-sonnet-4": "$3.00/1M",
+        }
+
+        self.sub_model_chips = {}
+        for m_id in model_list:
+            lbl = chip_short_names.get(m_id, m_id.split("/")[-1])
+            price = chip_short_prices.get(m_id, "")
+            chip = SubModelChip(model_id=m_id, label=lbl, price_badge=price, parent=self)
+            is_active = (m_id.lower() == (active_model_id or "").lower())
+            chip.set_selected(is_active)
+            chip.clicked.connect(lambda _, mid=m_id: self._on_sub_model_chip_clicked(mid))
+            self.chips_h_layout.addWidget(chip)
+            self.sub_model_chips[m_id] = chip
+
+        self.chips_h_layout.addStretch()
+
+    def _on_sub_model_chip_clicked(self, model_id: str):
+        """Handler when clicking a sub-model pill chip."""
+        config.formatting.model = model_id
+        config.formatting.openrouter_model = model_id
+        config.save()
+        self.ai_formatter.model = model_id
+        self.ai_formatter.openrouter_model = model_id
+
+        if hasattr(self, "sub_model_chips"):
+            for m_id, chip in self.sub_model_chips.items():
+                chip.set_selected(m_id.lower() == model_id.lower())
+
+        tier_key = get_tier_for_model(model_id) or "speed"
+        self._sync_priority_cards_ui(model_id)
+
+        self.combo_u_model.blockSignals(True)
+        matched = -1
+        for idx in range(self.combo_u_model.count()):
+            if self.combo_u_model.itemData(idx) == model_id:
+                matched = idx
+                break
+        if matched >= 0:
+            self.combo_u_model.setCurrentIndex(matched)
+        else:
+            self.combo_u_model.setEditText(model_id)
+        self.combo_u_model.blockSignals(False)
+
+        self._update_model_details_ui(model_id)
+        if hasattr(self, "card_llm"):
+            self._update_settings_summaries()
+
     def _on_priority_card_clicked(self, tier_key: str):
         if tier_key == "fast":
             tier_key = "speed"
@@ -3678,41 +5228,32 @@ class DashboardWindow(QMainWindow):
         self.ai_formatter.model = m_id
         self.ai_formatter.openrouter_model = m_id
 
+        self._sync_priority_cards_ui(m_id)
+        self._update_sub_model_chips(tier_key, m_id)
+
         self.combo_u_model.blockSignals(True)
-        self.combo_u_model.setEditText(m_id)
+        matched = -1
+        for idx in range(self.combo_u_model.count()):
+            if self.combo_u_model.itemData(idx) == m_id:
+                matched = idx
+                break
+        if matched >= 0:
+            self.combo_u_model.setCurrentIndex(matched)
+        else:
+            self.combo_u_model.setEditText(m_id)
         self.combo_u_model.blockSignals(False)
 
-        self._sync_priority_cards_ui(m_id)
         self._update_model_details_ui(m_id)
         if hasattr(self, "card_llm"):
             self._update_settings_summaries()
 
     def _sync_priority_cards_ui(self, current_model: str):
-        c_raw = (current_model or "").lower().strip()
-        c_clean = c_raw.replace("models/", "").replace("openai/", "").replace("google/", "")
-
-        matched = set()
+        matched_tier = get_tier_for_model(current_model) or "speed"
         for k in ("speed", "balanced", "quality"):
             card = self.priority_cards.get(k)
             if not card:
                 continue
-            tier_info = MODEL_TIERS.get(k, {})
-            t_model = tier_info.get("model", "").lower().strip()
-            t_clean = t_model.replace("models/", "").replace("openai/", "").replace("google/", "")
-
-            is_match = (
-                (c_raw and c_raw == t_model)
-                or (c_clean and c_clean == t_clean)
-                or (c_clean and c_clean in t_clean)
-                or (t_clean and t_clean in c_clean)
-                or (c_raw and c_raw in t_model)
-                or (t_model and t_model in c_raw)
-            )
-            if is_match and not matched:
-                matched.add(k)
-                card.set_selected(True)
-            else:
-                card.set_selected(False)
+            card.set_selected(k == matched_tier)
 
     def _update_model_details_ui(self, model_id: Optional[str] = None):
         if not model_id:
@@ -3772,59 +5313,202 @@ class DashboardWindow(QMainWindow):
             self.btn_toggle_model_details.setText(tr("btn_hide_custom_catalog") if not is_vis else tr("btn_toggle_custom_catalog"))
 
     def _toggle_custom_catalog(self):
-        is_vis = not self.custom_catalog_frame.isHidden()
-        self.custom_catalog_frame.setVisible(not is_vis)
-        if hasattr(self, "btn_toggle_custom_catalog"):
-            self.btn_toggle_custom_catalog.setText(tr("btn_hide_custom_catalog") if not is_vis else tr("btn_toggle_custom_catalog"))
+        if hasattr(self, "custom_catalog_frame"):
+            if hasattr(self.custom_catalog_frame, "toggle"):
+                self.custom_catalog_frame.toggle()
+                is_vis = self.custom_catalog_frame.is_expanded
+            else:
+                is_vis = not self.custom_catalog_frame.isHidden()
+                self.custom_catalog_frame.setVisible(not is_vis)
+            if hasattr(self, "btn_toggle_custom_catalog"):
+                self.btn_toggle_custom_catalog.setText(tr("btn_hide_custom_catalog") if is_vis else tr("btn_toggle_custom_catalog"))
 
     def _toggle_advanced_formatting(self):
-        is_vis = not self.adv_formatting_frame.isHidden()
-        self.adv_formatting_frame.setVisible(not is_vis)
-        if hasattr(self, "btn_toggle_adv_formatting"):
-            self.btn_toggle_adv_formatting.setText(tr("btn_hide_adv_formatting") if not is_vis else tr("btn_toggle_adv_formatting"))
+        if hasattr(self, "adv_formatting_frame"):
+            if hasattr(self.adv_formatting_frame, "toggle"):
+                self.adv_formatting_frame.toggle()
+                is_vis = self.adv_formatting_frame.is_expanded
+            else:
+                is_vis = not self.adv_formatting_frame.isHidden()
+                self.adv_formatting_frame.setVisible(not is_vis)
+            if hasattr(self, "btn_toggle_adv_formatting"):
+                self.btn_toggle_adv_formatting.setText(tr("btn_hide_adv_formatting") if is_vis else tr("btn_toggle_adv_formatting"))
 
     def _expand_all_settings(self):
+        """Expands all 7 settings cards and all nested progressive disclosure sub-accordions."""
         for card in getattr(self, "all_settings_cards", []):
             card.set_expanded(True)
+        for disc in getattr(self, "all_disclosure_sections", []):
+            if hasattr(disc, "set_expanded"):
+                disc.set_expanded(True)
 
     def _collapse_all_settings(self):
+        """Collapses all 7 settings cards and all nested progressive disclosure sub-accordions."""
         for card in getattr(self, "all_settings_cards", []):
             card.set_expanded(False)
+        for disc in getattr(self, "all_disclosure_sections", []):
+            if hasattr(disc, "set_expanded"):
+                disc.set_expanded(False)
 
-    def _on_settings_search_changed(self, query: str):
-        query = query.strip().lower()
+    def _on_settings_search_changed(self, raw_query: str):
+        """
+        Deep recursive search filtering across primary cards and nested disclosure sections.
+        Unhides matching cards, expands matching sub-accordions, and safely handles regex tokens.
+        Bilingual synonym normalization ensures queries match across German and English interfaces.
+        """
+        clean_query = raw_query.strip().lower()
         cards = getattr(self, "all_settings_cards", [])
-        if not query:
+        disclosures = getattr(self, "all_disclosure_sections", [])
+
+        if not clean_query:
             for card in cards:
                 card.setVisible(True)
                 card.set_expanded(False)
             if hasattr(self, "card_audio"):
                 self.card_audio.set_expanded(True)
+            for disc in disclosures:
+                if hasattr(disc, "set_expanded"):
+                    disc.set_expanded(False)
             return
 
+        SEARCH_SYNONYMS = {
+            "mikrofon": ["mikrofon", "microphone", "mic", "input", "gain", "eingang", "pegelerhöhung", "audio", "sound"],
+            "microphone": ["mikrofon", "microphone", "mic", "input", "gain", "eingang", "audio", "sound"],
+            "hotkey": ["hotkey", "tastenkürzel", "shortcut", "taste", "drücken", "toggle", "ptt"],
+            "tastenkürzel": ["hotkey", "tastenkürzel", "shortcut", "taste", "drücken", "toggle", "ptt"],
+            "lautstärke": ["lautstärke", "volume", "sound", "ton", "audio"],
+            "volume": ["lautstärke", "volume", "sound", "ton", "audio"],
+            "spracherkennung": ["spracherkennung", "speech", "whisper", "stt", "model", "modell"],
+            "speech": ["spracherkennung", "speech", "whisper", "stt", "model", "modell"],
+            "formatierung": ["formatierung", "formatting", "ai", "ki", "llm", "engine"],
+            "formatting": ["formatierung", "formatting", "ai", "ki", "llm", "engine"],
+            "bridge": ["bridge", "lan", "mobile", "server", "port", "qr", "token"],
+            "lan": ["bridge", "lan", "mobile", "server", "port"],
+            "storage": ["storage", "speicher", "speicherpfad", "disk", "whisper", "download"],
+            "speicher": ["storage", "speicher", "speicherpfad", "disk", "whisper", "download"],
+            "catalog": ["catalog", "katalog", "regeln", "prompt", "vokabular", "vocabulary", "custom"],
+            "katalog": ["catalog", "katalog", "regeln", "prompt", "vokabular", "vocabulary", "custom"],
+            "opacity": ["opacity", "transparenz", "deckkraft", "slider"],
+            "transparenz": ["opacity", "transparenz", "deckkraft", "slider"],
+            "scale": ["scale", "skalierung", "größe", "size"],
+            "skalierung": ["scale", "skalierung", "größe", "size"],
+            "cache": ["cache", "zwischenspeicher", "log", "protokoll", "reset", "zurücksetzen", "diagnose"],
+            "zwischenspeicher": ["cache", "zwischenspeicher", "log", "protokoll", "reset", "zurücksetzen", "diagnose"],
+        }
+
+        words = clean_query.split()
+        search_tokens = [clean_query] + [w for w in words if len(w) > 1]
+        for syn_key, syn_vals in SEARCH_SYNONYMS.items():
+            if clean_query == syn_key or syn_key in clean_query or any(clean_query == v for v in syn_vals) or any(w in syn_vals for w in words):
+                for v in syn_vals:
+                    if v not in search_tokens:
+                        search_tokens.append(v)
+
+        CARD_SYNONYMS = {
+            getattr(self, "card_audio", None): {"audio", "sound", "mikrofon", "microphone", "mic", "pegel", "gain", "lautstärke", "volume", "ducking", "lan", "bridge", "mobile"},
+            getattr(self, "card_stt", None): {"stt", "spracherkennung", "speech", "whisper", "model", "modell", "vram", "halluzination", "hallucination", "temp", "temperature", "prompt", "storage", "speicher"},
+            getattr(self, "card_fmt", None): {"formatting", "formatierung", "ai", "ki", "llm", "engine", "ollama", "openai", "gemini", "groq", "universal", "system-prompt", "tone", "stil", "katalog", "catalog", "regeln"},
+            getattr(self, "card_hk", None): {"hotkey", "shortcut", "taste", "tastenkürzel", "f8", "ptt", "toggle", "push to talk", "rückgängig", "undo", "scratchpad"},
+            getattr(self, "card_hud", None): {"hud", "floating", "overlay", "pill", "waveform", "visualizer", "position", "opacity", "transparenz", "skalierung", "scale"},
+            getattr(self, "card_gen", None): {"general", "allgemein", "autostart", "sound", "klänge", "cue", "minimized", "minimiert"},
+            getattr(self, "card_adv", None): {"system", "advanced", "erweitert", "cache", "zwischenspeicher", "export", "backup", "log", "reset", "zurücksetzen", "datenschutz", "privacy"},
+        }
+
+        DISC_SYNONYMS = {
+            getattr(self, "sub_mob_bridge", None): {"bridge", "lan", "mobile", "server", "port", "qr", "token"},
+            getattr(self, "model_storage_frame", None): {"storage", "speicher", "speicherpfad", "disk", "whisper", "download"},
+            getattr(self, "custom_catalog_frame", None): {"catalog", "katalog", "regeln", "prompt", "vokabular", "vocabulary", "custom"},
+            getattr(self, "adv_formatting_frame", None): {"markdown", "filler", "füllwörter", "seeding", "context", "kontext", "formatting", "formatierung"},
+            getattr(self, "hud_sliders_frame", None): {"hud", "opacity", "transparenz", "deckkraft", "scale", "skalierung", "bounce", "slider"},
+            getattr(self, "dev_options_frame", None): {"dev", "entwickler", "cache", "zwischenspeicher", "log", "protokoll", "reset", "zurücksetzen", "diagnose"},
+        }
+
         for card in cards:
-            match = False
-            # Check title, description, summary
-            if query in card.lbl_title.text().lower():
-                match = True
-            if card.lbl_desc and query in card.lbl_desc.text().lower():
-                match = True
-            if query in card.lbl_summary.text().lower():
-                match = True
+            card_matches = False
+            matched_disclosures_in_card = []
 
-            # Check all child labels, checkboxes, buttons, lineedits inside card
-            if not match:
+            # 1. Direct synonym match for card
+            card_syns = CARD_SYNONYMS.get(card, set())
+            if any(tok in card_syns for tok in search_tokens):
+                card_matches = True
+
+            # 2. Inspect Card Header (Title, Description, Summary)
+            if not card_matches:
+                t_lower = card.lbl_title.text().lower()
+                d_lower = card.lbl_desc.text().lower() if card.lbl_desc else ""
+                s_lower = card.lbl_summary.text().lower() if card.lbl_summary else ""
+                if any(tok in t_lower or tok in d_lower or tok in s_lower for tok in search_tokens):
+                    card_matches = True
+
+            # 3. Inspect Child Disclosure Sections Belonging to this Card
+            child_disclosures = [d for d in disclosures if card.isAncestorOf(d) or card == d.parent()]
+            for disc in child_disclosures:
+                disc_matches = False
+                disc_syns = DISC_SYNONYMS.get(disc, set())
+                if any(tok in disc_syns for tok in search_tokens):
+                    disc_matches = True
+                if not disc_matches and hasattr(disc, "lbl_title") and any(tok in disc.lbl_title.text().lower() for tok in search_tokens):
+                    disc_matches = True
+                if not disc_matches and hasattr(disc, "lbl_summary") and any(tok in disc.lbl_summary.text().lower() for tok in search_tokens):
+                    disc_matches = True
+
+                # Check child controls inside the disclosure body
+                body = getattr(disc, "body_widget", disc)
+                if not disc_matches:
+                    for child in body.findChildren((QLabel, QCheckBox, QPushButton, QLineEdit, QComboBox)):
+                        if isinstance(child, (QLabel, QCheckBox, QPushButton)) and any(tok in child.text().lower() for tok in search_tokens):
+                            disc_matches = True
+                            break
+                        elif isinstance(child, QLineEdit):
+                            ph = child.placeholderText().lower()
+                            val = child.text().lower()
+                            if any(tok in ph or tok in val for tok in search_tokens):
+                                disc_matches = True
+                                break
+                        elif isinstance(child, QComboBox):
+                            items_text = " ".join(child.itemText(i) for i in range(child.count())).lower()
+                            cur_t = child.currentText().lower()
+                            if any(tok in items_text or tok in cur_t for tok in search_tokens):
+                                disc_matches = True
+                                break
+
+                if disc_matches:
+                    matched_disclosures_in_card.append(disc)
+                    card_matches = True
+
+            # 4. Inspect All Other Controls in card.body_widget (excluding disclosures)
+            if not card_matches:
                 for child in card.body_widget.findChildren((QLabel, QCheckBox, QPushButton, QLineEdit, QComboBox)):
-                    if isinstance(child, (QLabel, QCheckBox, QPushButton)) and query in child.text().lower():
-                        match = True
+                    if any(d.isAncestorOf(child) for d in child_disclosures):
+                        continue
+                    if isinstance(child, (QLabel, QCheckBox, QPushButton)) and any(tok in child.text().lower() for tok in search_tokens):
+                        card_matches = True
                         break
-                    elif isinstance(child, QLineEdit) and query in child.placeholderText().lower():
-                        match = True
-                        break
+                    elif isinstance(child, QLineEdit):
+                        ph = child.placeholderText().lower()
+                        val = child.text().lower()
+                        if any(tok in ph or tok in val for tok in search_tokens):
+                            card_matches = True
+                            break
+                    elif isinstance(child, QComboBox):
+                        items_text = " ".join(child.itemText(i) for i in range(child.count())).lower()
+                        cur_t = child.currentText().lower()
+                        if any(tok in items_text or tok in cur_t for tok in search_tokens):
+                            card_matches = True
+                            break
 
-            card.setVisible(match)
-            if match:
+            # 5. Apply Visibility and Adaptive Expansion
+            card.setVisible(card_matches)
+            if card_matches:
                 card.set_expanded(True)
+                for disc in child_disclosures:
+                    if disc in matched_disclosures_in_card:
+                        disc.set_expanded(True)
+                    else:
+                        disc.set_expanded(False)
+            else:
+                for disc in child_disclosures:
+                    disc.set_expanded(False)
 
     def _update_settings_summaries(self):
         # Card 1: Allgemein
@@ -3927,7 +5611,9 @@ class DashboardWindow(QMainWindow):
             config.save()
             self.ai_formatter.model = raw
             self.ai_formatter.openrouter_model = raw
+            t_key = get_tier_for_model(raw) or "speed"
             self._sync_priority_cards_ui(raw)
+            self._update_sub_model_chips(t_key, raw)
             self._update_model_details_ui(raw)
 
     def _on_models_fetched_result(self, raw_models: list, error_msg: str):
@@ -4861,7 +6547,12 @@ class DashboardWindow(QMainWindow):
         btn_copy = QPushButton(tr("copy"))
         btn_copy.setObjectName("btn_secondary")
         btn_copy.setStyleSheet("padding: 2px 6px; font-size: 10.5px; min-height: 14px;")
-        btn_copy.clicked.connect(lambda checked, t=text: pyperclip.copy(t))
+
+        def _on_hist_copy(b=btn_copy, t=text):
+            if safe_clipboard_copy(t):
+                b.setText(tr("copied"))
+                QTimer.singleShot(1500, lambda: b.setText(tr("copy")))
+        btn_copy.clicked.connect(_on_hist_copy)
 
         top_row.addWidget(time_lbl)
         top_row.addWidget(mode_lbl)

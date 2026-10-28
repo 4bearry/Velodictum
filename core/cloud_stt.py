@@ -68,6 +68,23 @@ class CloudWhisperEngine:
         if model is not None:
             self.model = model
 
+    def _get_target_endpoint(self) -> str:
+        from config import validate_endpoint_url
+        if self.provider in ("universal", "openrouter", "custom"):
+            raw_endpoint = self.endpoint or "https://openrouter.ai/api/v1/audio/transcriptions"
+        elif self.provider in ("grok", "groq"):
+            raw_endpoint = self.endpoint or "https://api.groq.com/openai/v1/audio/transcriptions"
+        else:
+            raw_endpoint = self.endpoint or "https://api.openai.com/v1/audio/transcriptions"
+        return validate_endpoint_url(raw_endpoint, allow_localhost=True)
+
+    def prewarm_connection(self) -> bool:
+        try:
+            from formatting_providers import http_pool
+            return http_pool.prewarm(self._get_target_endpoint())
+        except Exception:
+            return False
+
     def transcribe(
         self,
         audio_data: np.ndarray,
@@ -79,6 +96,7 @@ class CloudWhisperEngine:
         Transcribe audio using the chosen cloud provider or generic OpenAI-compatible endpoint.
         """
         from config import validate_endpoint_url
+        from formatting_providers import http_pool
 
         audio_duration = len(audio_data) / sample_rate
         start_t = time.perf_counter()
@@ -165,7 +183,7 @@ class CloudWhisperEngine:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=12.0) as resp:
+            with http_pool.urlopen(req, timeout=12.0) as resp:
                 res_json = json.loads(resp.read().decode("utf-8"))
                 text = res_json.get("text", "").strip()
                 detected_lang = res_json.get("language", language or "de")

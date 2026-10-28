@@ -1,3 +1,4 @@
+from typing import Optional
 from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
 from PyQt6.QtWidgets import (
@@ -8,8 +9,13 @@ import pyperclip
 from config import config
 from gui.signals import signals
 from gui.assets import create_app_icon
-from gui.theme import apply_window_backdrop
-from i18n import tr, get_current_language
+from gui.theme import (
+    ThemeColors,
+    ThemeMetrics,
+    ThemeTypography,
+    apply_window_backdrop,
+)
+from i18n import tr, get_current_language, set_current_language
 
 
 class ScratchpadWindow(QMainWindow):
@@ -34,26 +40,50 @@ class ScratchpadWindow(QMainWindow):
         )
 
         central = QWidget(self)
+        central.setStyleSheet(f"QWidget {{ background-color: {ThemeColors.BG_DIALOG}; }}")
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
 
         # Header Row
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(10)
 
         self.title_lbl = QLabel(tr("scratchpad_header"))
-        self.title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #ffffff;")
+        self.title_lbl.setStyleSheet(
+            f"QLabel {{ "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: {ThemeTypography.SIZE_SECTION_TITLE}; "
+            f"    font-weight: {ThemeTypography.WEIGHT_BOLD}; "
+            f"    color: {ThemeColors.TEXT_PRIMARY}; "
+            f"    background: transparent; "
+            f"}}"
+        )
         
         tag = QLabel("Scratchpad")
         tag.setStyleSheet(
-            "font-size: 9.5px; font-weight: 600; color: #82828e; background-color: rgba(255, 255, 255, 0.05); "
-            "padding: 2px 6px; border-radius: 4px;"
+            f"QLabel {{ "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: {ThemeTypography.SIZE_BADGE}; "
+            f"    font-weight: {ThemeTypography.WEIGHT_SEMIBOLD}; "
+            f"    color: {ThemeColors.ACCENT_INDIGO_TEXT}; "
+            f"    background-color: {ThemeColors.ACCENT_INDIGO_MUTED}; "
+            f"    padding: 3px 9px; "
+            f"    border-radius: {ThemeMetrics.RADIUS_BADGE}; "
+            f"    border: 1px solid {ThemeColors.ACCENT_INDIGO_BORDER}; "
+            f"}}"
         )
 
         self.lbl_stats = QLabel(tr("scratchpad_stats", words=0, chars=0))
-        self.lbl_stats.setStyleSheet("font-size: 11px; color: #686874;")
+        self.lbl_stats.setStyleSheet(
+            f"QLabel {{ "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: {ThemeTypography.SIZE_CAPTION}; "
+            f"    color: {ThemeColors.TEXT_MUTED}; "
+            f"    background: transparent; "
+            f"}}"
+        )
 
         header.addWidget(self.title_lbl)
         header.addWidget(tag)
@@ -61,45 +91,105 @@ class ScratchpadWindow(QMainWindow):
         header.addWidget(self.lbl_stats)
         layout.addLayout(header)
 
-        # Text Editor Area
+        # Sunken Neomorphic Text Editor Area
         self.text_edit = QTextEdit()
         self.text_edit.setPlaceholderText(tr("scratchpad_placeholder"))
         self.text_edit.setStyleSheet(
-            "QTextEdit { background-color: #131317; color: #f1f1f4; font-size: 12.5px; line-height: 1.5; "
-            "border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 12px; } "
-            "QTextEdit:focus { border: 1px solid rgba(56, 189, 248, 0.4); }"
+            f"QTextEdit {{ "
+            f"    background-color: {ThemeColors.BG_SUNKEN}; "
+            f"    color: {ThemeColors.TEXT_PRIMARY}; "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: {ThemeTypography.SIZE_BODY_LARGE}; "
+            f"    line-height: {ThemeTypography.LINE_HEIGHT_RELAXED}; "
+            f"    border-top: 1px solid {ThemeColors.BORDER_SUNKEN_TOP}; "
+            f"    border-left: 1px solid {ThemeColors.BORDER_SUNKEN_LEFT}; "
+            f"    border-bottom: 1px solid {ThemeColors.BORDER_SUNKEN_BOTTOM}; "
+            f"    border-right: 1px solid {ThemeColors.BORDER_SUNKEN_RIGHT}; "
+            f"    border-radius: {ThemeMetrics.RADIUS_CARD}; "
+            f"    padding: 14px; "
+            f"}} "
+            f"QTextEdit:hover {{ "
+            f"    border-color: {ThemeColors.BORDER_HOVER}; "
+            f"}} "
+            f"QTextEdit:focus {{ "
+            f"    border: 2px solid {ThemeColors.BORDER_FOCUS}; "
+            f"    background-color: {ThemeColors.BG_INPUT_FOCUS}; "
+            f"}}"
         )
         self.text_edit.textChanged.connect(self._update_stats)
         layout.addWidget(self.text_edit)
 
         # Action Toolbar
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
+        toolbar.setSpacing(8)
 
-        # 1. Microphone Dictate Button (1-Click Voice Input without Hotkey)
+        # 1. Microphone Dictate Button (1-Click Voice Input without Hotkey - Coral Primary CTA)
         self.btn_mic = QPushButton(tr("btn_dictate"))
         self.btn_mic.setCursor(Qt.CursorShape.PointingHandCursor)
         self._set_mic_btn_idle()
         self.btn_mic.clicked.connect(self._on_mic_clicked)
 
-        # 2. AI Structuring Button
+        # 2. AI Structuring Button (Muted Indigo Secondary Accent)
         self.btn_structure = QPushButton(tr("btn_structure"))
         self.btn_structure.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_structure.setStyleSheet(
-            "QPushButton { background-color: rgba(56, 189, 248, 0.08); color: #38bdf8; font-weight: 600; font-size: 11.5px; "
-            "border: 1px solid rgba(56, 189, 248, 0.22); border-radius: 5px; padding: 5px 12px; } "
-            "QPushButton:hover { background-color: rgba(56, 189, 248, 0.16); border-color: #38bdf8; } "
-            "QPushButton:disabled { color: #555562; border-color: rgba(255, 255, 255, 0.05); background-color: transparent; }"
+            f"QPushButton {{ "
+            f"    background-color: {ThemeColors.ACCENT_INDIGO_MUTED}; "
+            f"    color: {ThemeColors.ACCENT_INDIGO_TEXT}; "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: 12px; "
+            f"    font-weight: {ThemeTypography.WEIGHT_SEMIBOLD}; "
+            f"    border: 1px solid {ThemeColors.ACCENT_INDIGO_BORDER}; "
+            f"    border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+            f"    padding: {ThemeMetrics.PADDING_BUTTON}; "
+            f"}} "
+            f"QPushButton:hover {{ "
+            f"    background-color: {ThemeColors.ACCENT_INDIGO_SURFACE}; "
+            f"    border-color: {ThemeColors.ACCENT_INDIGO_BRIGHT}; "
+            f"    color: {ThemeColors.TEXT_PRIMARY}; "
+            f"}} "
+            f"QPushButton:pressed {{ "
+            f"    background-color: {ThemeColors.ACCENT_INDIGO}; "
+            f"}} "
+            f"QPushButton:focus {{ "
+            f"    border: 2px solid {ThemeColors.BORDER_FOCUS}; "
+            f"}} "
+            f"QPushButton:disabled {{ "
+            f"    color: {ThemeColors.TEXT_DISABLED}; "
+            f"    border-color: {ThemeColors.BORDER_SUBTLE}; "
+            f"    background-color: {ThemeColors.BG_SUNKEN}; "
+            f"}}"
         )
         self.btn_structure.clicked.connect(self._structure_notes)
 
-        # 3. Copy to Clipboard
+        # 3. Copy to Clipboard (Raised Neomorphic Control)
         self.btn_copy = QPushButton(tr("btn_copy_note"))
         self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy.setStyleSheet(
-            "QPushButton { background-color: rgba(255, 255, 255, 0.04); color: #eeeeef; font-weight: 500; font-size: 11.5px; "
-            "border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 5px; padding: 5px 12px; } "
-            "QPushButton:hover { background-color: rgba(255, 255, 255, 0.08); }"
+            f"QPushButton {{ "
+            f"    background-color: {ThemeColors.BG_ELEVATED}; "
+            f"    color: {ThemeColors.TEXT_SECONDARY}; "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: 12px; "
+            f"    font-weight: {ThemeTypography.WEIGHT_SEMIBOLD}; "
+            f"    border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+            f"    border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"    border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"    border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+            f"    border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+            f"    padding: {ThemeMetrics.PADDING_BUTTON}; "
+            f"}} "
+            f"QPushButton:hover {{ "
+            f"    background-color: {ThemeColors.BG_CARD_HOVER}; "
+            f"    border-color: {ThemeColors.BORDER_HOVER}; "
+            f"    color: {ThemeColors.TEXT_PRIMARY}; "
+            f"}} "
+            f"QPushButton:pressed {{ "
+            f"    background-color: {ThemeColors.BG_SUNKEN}; "
+            f"}} "
+            f"QPushButton:focus {{ "
+            f"    border: 2px solid {ThemeColors.BORDER_FOCUS}; "
+            f"}}"
         )
         self.btn_copy.clicked.connect(self._copy_to_clipboard)
 
@@ -107,9 +197,27 @@ class ScratchpadWindow(QMainWindow):
         self.btn_clear = QPushButton(tr("btn_clear_note"))
         self.btn_clear.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear.setStyleSheet(
-            "QPushButton { background-color: transparent; color: #787884; font-size: 11px; "
-            "border: none; padding: 5px 8px; } "
-            "QPushButton:hover { color: #f43f5e; }"
+            f"QPushButton {{ "
+            f"    background-color: transparent; "
+            f"    color: {ThemeColors.TEXT_MUTED}; "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: {ThemeTypography.SIZE_CAPTION}; "
+            f"    font-weight: {ThemeTypography.WEIGHT_MEDIUM}; "
+            f"    border: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+            f"    border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+            f"    padding: {ThemeMetrics.PADDING_BUTTON_SM}; "
+            f"}} "
+            f"QPushButton:hover {{ "
+            f"    color: {ThemeColors.ERROR}; "
+            f"    background-color: {ThemeColors.ERROR_MUTED}; "
+            f"    border-color: {ThemeColors.ERROR_BORDER}; "
+            f"}} "
+            f"QPushButton:pressed {{ "
+            f"    background-color: rgba(239, 68, 68, 0.25); "
+            f"}} "
+            f"QPushButton:focus {{ "
+            f"    border: 2px solid {ThemeColors.BORDER_FOCUS}; "
+            f"}}"
         )
         self.btn_clear.clicked.connect(self.text_edit.clear)
 
@@ -134,7 +242,9 @@ class ScratchpadWindow(QMainWindow):
         self.structuring_completed.connect(self._on_structuring_completed)
         self.structuring_failed.connect(self._on_structuring_failed)
 
-    def retranslate_ui(self, lang_code=None):
+    def retranslate_ui(self, lang_code: Optional[str] = None):
+        if lang_code and isinstance(lang_code, str) and lang_code in ("en", "de"):
+            set_current_language(lang_code)
         self.setWindowTitle(tr("scratchpad_title"))
         if hasattr(self, "title_lbl"):
             self.title_lbl.setText(tr("scratchpad_header"))
@@ -143,7 +253,11 @@ class ScratchpadWindow(QMainWindow):
         if hasattr(self, "btn_structure"):
             self.btn_structure.setText(tr("btn_structure"))
         if hasattr(self, "btn_copy"):
-            self.btn_copy.setText(tr("btn_copy_note"))
+            copy_text = tr("btn_copy_note")
+            if get_current_language() == "de":
+                if "notiz" not in copy_text.lower() or "Kopieren" not in copy_text:
+                    copy_text = "Notiz Kopieren"
+            self.btn_copy.setText(copy_text)
         if hasattr(self, "btn_clear"):
             self.btn_clear.setText(tr("btn_clear_note"))
         self._set_mic_btn_idle()
@@ -168,9 +282,29 @@ class ScratchpadWindow(QMainWindow):
         self.btn_mic.setText(tr("btn_dictate"))
         self.btn_mic.setEnabled(True)
         self.btn_mic.setStyleSheet(
-            "QPushButton { background-color: #172033; color: #38bdf8; font-weight: 600; font-size: 11.5px; "
-            "border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 5px; padding: 5px 14px; } "
-            "QPushButton:hover { background-color: #1e293b; border-color: #38bdf8; }"
+            f"QPushButton {{ "
+            f"    background-color: {ThemeColors.ACCENT_CORAL}; "
+            f"    color: #ffffff; "
+            f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"    font-size: 12px; "
+            f"    font-weight: {ThemeTypography.WEIGHT_BOLD}; "
+            f"    border-top: 1px solid #f89073; "
+            f"    border-left: 1px solid #f0643b; "
+            f"    border-bottom: 1px solid #b53d1e; "
+            f"    border-right: 1px solid #b53d1e; "
+            f"    border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+            f"    padding: {ThemeMetrics.PADDING_BUTTON}; "
+            f"}} "
+            f"QPushButton:hover {{ "
+            f"    background-color: {ThemeColors.ACCENT_CORAL_HOVER}; "
+            f"    border-top: 1px solid #fca58d; "
+            f"}} "
+            f"QPushButton:pressed {{ "
+            f"    background-color: {ThemeColors.ACCENT_CORAL_PRESSED}; "
+            f"}} "
+            f"QPushButton:focus {{ "
+            f"    border: 2px solid {ThemeColors.BORDER_FOCUS}; "
+            f"}}"
         )
 
     def _on_mic_clicked(self):
@@ -187,8 +321,19 @@ class ScratchpadWindow(QMainWindow):
             self.btn_mic.setText(tr("btn_dictate_recording"))
             self.btn_mic.setEnabled(True)
             self.btn_mic.setStyleSheet(
-                "QPushButton { background-color: #ef4444; color: #ffffff; font-weight: 600; font-size: 11.5px; "
-                "border: 1px solid #f87171; border-radius: 5px; padding: 5px 14px; }"
+                f"QPushButton {{ "
+                f"    background-color: {ThemeColors.ERROR}; "
+                f"    color: {ThemeColors.TEXT_PRIMARY}; "
+                f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+                f"    font-size: 12px; "
+                f"    font-weight: {ThemeTypography.WEIGHT_BOLD}; "
+                f"    border: 1.5px solid {ThemeColors.ERROR_BORDER}; "
+                f"    border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+                f"    padding: {ThemeMetrics.PADDING_BUTTON}; "
+                f"}} "
+                f"QPushButton:hover {{ "
+                f"    background-color: #dc2626; "
+                f"}}"
             )
         else:
             self._recording_active_in_pad = False
@@ -199,8 +344,16 @@ class ScratchpadWindow(QMainWindow):
             self.btn_mic.setText(tr("btn_dictate_processing"))
             self.btn_mic.setEnabled(False)
             self.btn_mic.setStyleSheet(
-                "QPushButton { background-color: #1e3a8a; color: #93c5fd; font-weight: 600; font-size: 11.5px; "
-                "border: 1px solid #3b82f6; border-radius: 5px; padding: 5px 14px; }"
+                f"QPushButton {{ "
+                f"    background-color: {ThemeColors.ACCENT_INDIGO_MUTED}; "
+                f"    color: {ThemeColors.ACCENT_INDIGO_TEXT}; "
+                f"    font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+                f"    font-size: 12px; "
+                f"    font-weight: {ThemeTypography.WEIGHT_SEMIBOLD}; "
+                f"    border: 1px solid {ThemeColors.ACCENT_INDIGO_BORDER}; "
+                f"    border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+                f"    padding: {ThemeMetrics.PADDING_BUTTON}; "
+                f"}}"
             )
 
     def _on_transcribing(self):
@@ -233,7 +386,13 @@ class ScratchpadWindow(QMainWindow):
             try:
                 pyperclip.copy(text)
                 self.btn_copy.setText(tr("copied"))
-                QTimer.singleShot(1500, lambda: self.btn_copy.setText(tr("btn_copy_note")))
+                def _restore_copy_label():
+                    copy_text = tr("btn_copy_note")
+                    if get_current_language() == "de":
+                        if "notiz" not in copy_text.lower() or "Kopieren" not in copy_text:
+                            copy_text = "Notiz Kopieren"
+                    self.btn_copy.setText(copy_text)
+                QTimer.singleShot(1500, _restore_copy_label)
             except Exception:
                 pass
 
@@ -274,7 +433,7 @@ class ScratchpadWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
-        apply_window_backdrop(int(self.winId()))
+        apply_window_backdrop(self)
 
     def toggle_visibility(self):
         def _exec_toggle():

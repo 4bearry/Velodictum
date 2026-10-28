@@ -222,6 +222,20 @@ class WhisperEngine:
             except Exception as e:
                 print(f"[STT] Warmup warning: {e}")
 
+    def prewarm_connection(self) -> bool:
+        """Pre-warms Cloud STT HTTPS socket if a cloud provider is active."""
+        active_provider = getattr(config.whisper, "provider", "local")
+        if active_provider in ("universal", "openrouter", "custom", "grok", "groq", "openai"):
+            try:
+                from cloud_stt import CloudWhisperEngine
+                endpoint = getattr(config.whisper, "universal_endpoint", None) if active_provider in ("universal", "openrouter", "custom") else None
+                model = getattr(config.whisper, "universal_model", None) if active_provider in ("universal", "openrouter", "custom") else None
+                cloud_eng = CloudWhisperEngine(provider=active_provider, endpoint=endpoint, model=model)
+                return cloud_eng.prewarm_connection()
+            except Exception:
+                return False
+        return True
+
     def transcribe(self, audio_data: np.ndarray, sample_rate: int = 16000, task: str = "transcribe") -> Dict:
         """
         Transcribe audio numpy array. Supports task='transcribe' or task='translate'.

@@ -86,15 +86,17 @@ flowchart TD
 * Context categorization: **IDE / Code** (VS Code, PyCharm, Cursor), **Email** (Outlook, Thunderbird), **Chat** (Slack, Discord, Teams), **Notes / Docs** (Notion, Obsidian, Word).
 * UI Automation caret inspection for automatic capitalization and punctuation continuity.
 
-### Layer 4: Semantic Flow Layer & Note Structuring (`ai_formatter.py`)
+### Layer 4: Semantic Flow Layer & Note Structuring (`ai_formatter.py`, `formatting_providers.py`)
 * Single-pass semantic cleanup, disfluency removal, spoken punctuation interpretation, and tone transformation.
+* **Curated 3-Tier Model Catalog**: 10 live-benchmarked LLMs partitioned into **Speed Priority** (< 250ms), **Balanced** (300–500ms), and **Highest Quality** (1–2s) with exact-first slug matching and real-time token pricing telemetry.
 * **XML Anti-Answering Protection**: Encloses verbatim speech in `<diktat>...</diktat>` tags to prevent LLMs from answering dictations that contain questions or coding instructions.
 * **Note Structuring (`structure_notes`)**: Transforms unstructured brain dumps and raw meeting notes into structured Markdown documents (headings, bullet points, task checkboxes).
 
 ### Layer 5: Smart Text Injection & Voice Actions (`text_injector.py`, `voice_editor.py`)
-* Clipboard backup, atomic paste injection via Win32 keystroke emulation, and delayed asynchronous clipboard restoration.
+* **Zero-Pollution Native Clipboard Tracking**: Uses Win32 `GetClipboardSequenceNumber()` instead of sentinel strings, guaranteeing zero clipboard corruption or leaked artifacts.
+* **Immediate Clipboard Retention**: Dictated text remains ready in the Windows Clipboard by default (`restore_clipboard=False`), enabling instant manual `Ctrl+V` pasting when window focus on text input fields is lost.
 * **Send It Voice Action**: Automatic detection of spoken sending triggers (*"und absenden"*, *"und abschicken"*, *"send it"*). Strips the trigger phrase and simulates an Enter keypress in messaging apps.
-* **In-Place Voice Editor ("Velodictum Transform")**: Global shortcut `CTRL + ALT + SPACE` / `CTRL + ALT + Z` for transforming highlighted text in any application based on voice instructions.
+* **In-Place Voice Editor ("Velodictum Transform")**: Global shortcut for transforming highlighted text in any application based on spoken instructions, with atomic revert (`revert_last_injection`).
 
 ### Layer 6: Mobile LAN Bridge (`mobile_bridge_server.py`)
 * Zero-config HTTP/WebM server running on local LAN.
@@ -102,7 +104,7 @@ flowchart TD
 * QR code pairing and live IP detection (`get_local_ip()`).
 
 ### Layer 7: User Interface & Windows (`gui/`)
-* **Studio Dashboard (`gui/dashboard_window.py`)**: Hardware telemetry (GPU VRAM, CUDA capability), live audio visualizer, 2-tier mode/tone selectors, and dynamic provider settings.
+* **Studio Dashboard (`gui/dashboard_window.py`)**: Hardware telemetry (GPU VRAM, CUDA capability), live audio visualizer, 3-tier priority cards, interactive Sub-Model Quick-Chips Bar (`SubModelChip`), collapsible detail inspection box, and dynamic provider settings.
 * **Floating HUD Pill (`gui/floating_hud.py`)**: Ultra-smooth physics-based spring morphing, rubber overshoot popping, squash & stretch volume preservation, and specular glass highlights with zero idle CPU overhead.
 * **Collapsible Accordion Settings Architecture (`CollapsibleSettingsCard`)**: 7 collapsible cards with live status summary badges and global `[ Alle aufklappen ]` / `[ Alle einklappen ]` actions to prevent information overload.
 * **Velodictum Scratchpad (`gui/scratchpad_window.py`)**: Standalone, focus-aware note-taking notepad with direct 1-click dictation toggle and AI structuring.
@@ -115,20 +117,17 @@ flowchart TD
 | Shortcut | Action | Description |
 | :--- | :--- | :--- |
 | `CTRL + ALT + SPACE` | Push-to-Talk / Toggle Dictation | Primary dictation trigger for injecting text into the active window |
-| `CTRL + SHIFT + D` | Scratchpad Toggle | Opens/focuses the WhisperFlow Scratchpad window |
-| `CTRL + ALT + Z` | In-Place Voice Editor | Rewrites highlighted/selected text in any app via voice instruction |
+| `CTRL + SHIFT + D` | Scratchpad Toggle | Opens/focuses the Velodictum Scratchpad window |
+| `CTRL + ALT + Z` | Undo / Revert Last Injection | Reverts the last text injection or restores raw transcript |
 
 ---
 
 ## 7. Verification & Automated Test Suites
 
-All features are covered by the comprehensive end-to-end test suite in `test_power_features_e2e.py`:
-* **Test 1**: Hotkey Decoding (Windows ASCII control code normalization for Ctrl combinations)
-* **Test 2**: 'Send It' Voice Trigger Regex & Execution
-* **Test 3**: Hallucination Squelcher & Silence Filtering
-* **Test 4**: Context Intelligence & Foreground Window Detection
-* **Test 5**: Mobile LAN Bridge HTTP/WebM Lifecycle & Dictation API
-* **Test 6**: Config Dataclasses & Field Persistence
-* **Test 7**: 2-Tier Architecture (Operating Mode & Tone Profiles)
-* **Test 8**: Scratchpad Mic Button & Note Structuring
-* **Test 9**: Universal API, Provider Detection, Model Categorization, & Dynamic UI Switching
+All features are covered by comprehensive unit and end-to-end test suites:
+* `test_clipboard_safety.py`: Native sequence number tracking, zero sentinel leaks, unicode roundtripping, and clipboard retention.
+* `test_model_tiers.py`: 3-tier catalog integrity, exact-first slug resolution, pricing metadata, and fallback heuristics.
+* `test_i18n.py`: Complete bilingual UI translation synchronization (DE/EN) and catalog parity.
+* `test_security_credentials.py`: Hardware-bound Windows Credential Vault secret isolation and key masking.
+* `test_power_features_e2e.py`: End-to-end pipeline validation across STT, formatting, context detection, and LAN bridge.
+

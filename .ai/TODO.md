@@ -126,5 +126,30 @@
 - [x] **Release Distribution Privacy Guard**:
   - Build script (`build_executable.py` & `build.bat`) sanitized to prevent bundling private developer configuration files (`settings.json`, `snippets.json`, `vocabulary.json`).
   - First launch on destination PC generates clean, neutral factory defaults.
+
+---
+
+## Phase 11: 3-Tier Model Intelligence & Zero-Pollution Clipboard Architecture
+- [x] **Curated 3-Tier Model Hierarchy**:
+  - 10 live-benchmarked LLMs categorized into **Speed Priority** (< 250ms), **Balanced** (300–500ms), and **Highest Quality** (1–2s).
+  - Accurate token pricing metadata, context limits, and latency targets integrated into `formatting_providers.py`.
+- [x] **Interactive Sub-Model Quick-Chips Bar (`SubModelChip`)**:
+  - Visible 1-click model pill chips rendered directly below the 3 priority cards in the Formatting tab.
+  - Live price badges, instant config persistence, and real-time synchronization with the model catalog dropdown.
+  - Strict Zero-Emoji typography compliance across all chip titles and headers.
+- [x] **Exact-First Slug Resolution & Prefix Collision Fix**:
+  - Refactored model matching in `formatting_providers.py` and `ai_formatter.py` to prevent greedy substring captures (e.g. `gemini-2.5-flash` hijacking `gemini-2.5-flash-lite`).
+- [x] **Native Win32 Clipboard Sequence Tracking**:
+  - Replaced temporary sentinel strings (`__VELODICTUM_GRAB_...`) with native `user32.GetClipboardSequenceNumber()` in `grab_selected_text_win32()`.
+  - 100% elimination of leaked test strings or clipboard corruption in Windows Clipboard History (`Win+V`).
+- [x] **Immediate Dictation Clipboard Retention**:
+  - Default `restore_clipboard` set to `False` in `InjectionConfig`, keeping freshly dictated text ready on the clipboard.
+  - Users who accidentally click away from text input fields during dictation can immediately press `Ctrl+V` in their target window without opening the app.
+- [x] **Hardened History & Studio Copy Actions**:
+  - Integrated `safe_clipboard_copy()` across Studio and History cards with retry against OS clipboard locks and visual *"Kopiert!"* status feedback.
+
+---
+
+## Future Roadmap & Mobile
 - [ ] **Native Android App**:
   - Standalone Android Client with Floating Overlay companion for desktop bridge.

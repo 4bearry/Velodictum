@@ -15,7 +15,12 @@ from PyQt6.QtWidgets import (
 )
 
 from config import config
-from gui.theme import apply_window_backdrop
+from gui.theme import (
+    apply_window_backdrop,
+    ThemeColors,
+    ThemeTypography,
+    ThemeMetrics,
+)
 from gui.signals import signals
 import i18n
 
@@ -36,14 +41,25 @@ class LanguageOptionCard(QFrame):
 
         row_top = QHBoxLayout()
         self.lbl_title = QLabel(title)
-        self.lbl_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #f4f4f6; background: transparent;")
+        self.lbl_title.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"font-size: {ThemeTypography.SIZE_SECTION_TITLE}; "
+            f"font-weight: {ThemeTypography.WEIGHT_BOLD}; "
+            f"color: {ThemeColors.TEXT_PRIMARY}; background: transparent;"
+        )
         row_top.addWidget(self.lbl_title)
 
         if badge:
             self.lbl_badge = QLabel(badge)
             self.lbl_badge.setStyleSheet(
-                "background-color: rgba(56, 189, 248, 0.15); color: #38bdf8; "
-                "font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px;"
+                f"background-color: {ThemeColors.ACCENT_INDIGO_MUTED}; "
+                f"color: {ThemeColors.ACCENT_INDIGO_TEXT}; "
+                f"font-size: {ThemeTypography.SIZE_BADGE}; "
+                f"font-weight: {ThemeTypography.WEIGHT_BOLD}; "
+                f"letter-spacing: 0.4px; "
+                f"padding: 2px 8px; "
+                f"border-radius: {ThemeMetrics.RADIUS_BADGE}; "
+                f"border: 1px solid {ThemeColors.ACCENT_INDIGO_BORDER};"
             )
             row_top.addWidget(self.lbl_badge)
 
@@ -52,7 +68,13 @@ class LanguageOptionCard(QFrame):
 
         self.lbl_desc = QLabel(subtitle)
         self.lbl_desc.setWordWrap(True)
-        self.lbl_desc.setStyleSheet("font-size: 11.5px; color: #9d9da8; line-height: 1.3; background: transparent;")
+        self.lbl_desc.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"font-size: {ThemeTypography.SIZE_CAPTION}; "
+            f"color: {ThemeColors.TEXT_MUTED}; "
+            f"line-height: {ThemeTypography.LINE_HEIGHT_NORMAL}; "
+            f"background: transparent;"
+        )
         layout.addWidget(self.lbl_desc)
 
         self._update_style()
@@ -64,13 +86,24 @@ class LanguageOptionCard(QFrame):
     def _update_style(self):
         if self.selected:
             self.setStyleSheet(
-                "QFrame#LanguageOptionCard { background-color: #172033; border: 1.5px solid #38bdf8; border-radius: 8px; } "
+                f"QFrame#LanguageOptionCard {{ background-color: {ThemeColors.BG_CARD_ACTIVE}; "
+                f"border: 1.5px solid {ThemeColors.ACCENT_INDIGO_BRIGHT}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CARD}; }} "
                 "QLabel { background: transparent; }"
             )
         else:
             self.setStyleSheet(
-                "QFrame#LanguageOptionCard { background-color: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 8px; } "
-                "QFrame#LanguageOptionCard:hover { background-color: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.12); } "
+                f"QFrame#LanguageOptionCard {{ background-color: {ThemeColors.BG_CARD}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_SUBTLE}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_BOTTOM}; "
+                f"border-radius: {ThemeMetrics.RADIUS_CARD}; }} "
+                f"QFrame#LanguageOptionCard:hover {{ background-color: {ThemeColors.BG_CARD_HOVER}; "
+                f"border-top: 1px solid {ThemeColors.BORDER_SPECULAR_TOP_HOVER}; "
+                f"border-left: 1px solid {ThemeColors.BORDER_HOVER}; "
+                f"border-right: 1px solid {ThemeColors.BORDER_HOVER}; "
+                f"border-bottom: 1px solid {ThemeColors.BORDER_BOTTOM}; }} "
                 "QLabel { background: transparent; }"
             )
 
@@ -87,7 +120,10 @@ class LanguageSelectionDialog(QDialog):
         self.setWindowTitle("Velodictum - Language Selection")
         self.setFixedSize(540, 390)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
-        self.setStyleSheet("QDialog { background-color: #0c0c0f; color: #f1f1f4; } QLabel { background: transparent; }")
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {ThemeColors.BG_DIALOG}; color: {ThemeColors.TEXT_SECONDARY}; }} "
+            f"QLabel {{ background: transparent; }}"
+        )
         apply_window_backdrop(self)
 
         layout = QVBoxLayout(self)
@@ -96,11 +132,18 @@ class LanguageSelectionDialog(QDialog):
 
         # Title & Subtitle
         lbl_welcome = QLabel("Welcome to Velodictum")
-        lbl_welcome.setStyleSheet("font-size: 20px; font-weight: 800; color: #ffffff; letter-spacing: -0.3px; background: transparent;")
+        lbl_welcome.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_DISPLAY}; "
+            f"font-size: 20px; font-weight: {ThemeTypography.WEIGHT_BOLD}; "
+            f"color: {ThemeColors.TEXT_PRIMARY}; letter-spacing: -0.3px; background: transparent;"
+        )
         layout.addWidget(lbl_welcome)
 
         lbl_sub = QLabel("Please choose your preferred interface language to continue:")
-        lbl_sub.setStyleSheet("font-size: 12.5px; color: #8e8e98; background: transparent;")
+        lbl_sub.setStyleSheet(
+            f"font-family: {ThemeTypography.FONT_FAMILY_PRIMARY}; "
+            f"font-size: {ThemeTypography.SIZE_BODY_LARGE}; color: {ThemeColors.TEXT_MUTED}; background: transparent;"
+        )
         layout.addWidget(lbl_sub)
 
         layout.addSpacing(6)
@@ -134,10 +177,13 @@ class LanguageSelectionDialog(QDialog):
 
         self.btn_confirm = QPushButton("Continue / Fortfahren")
         self.btn_confirm.setStyleSheet(
-            "QPushButton { background-color: #0284c7; color: #ffffff; font-weight: 700; font-size: 13px; "
-            "padding: 8px 24px; border-radius: 6px; border: none; } "
-            "QPushButton:hover { background-color: #0369a1; } "
-            "QPushButton:pressed { background-color: #075985; }"
+            f"QPushButton {{ background-color: {ThemeColors.ACCENT_CORAL}; color: #ffffff; "
+            f"font-weight: {ThemeTypography.WEIGHT_BOLD}; font-size: 13px; "
+            f"padding: 9px 26px; border-radius: {ThemeMetrics.RADIUS_CONTROL}; "
+            f"border-top: 1px solid #f89073; border-bottom: 1px solid #b53d1e; }} "
+            f"QPushButton:hover {{ background-color: {ThemeColors.ACCENT_CORAL_HOVER}; }} "
+            f"QPushButton:pressed {{ background-color: {ThemeColors.ACCENT_CORAL_PRESSED}; }} "
+            f"QPushButton:focus {{ border: 2px solid {ThemeColors.BORDER_FOCUS}; }}"
         )
         self.btn_confirm.clicked.connect(self._confirm)
         row_btn.addWidget(self.btn_confirm)

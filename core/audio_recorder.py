@@ -160,6 +160,69 @@ class AudioRecorder:
 
             return True
 
+    def pop_completed_chunk_on_silence(
+        self,
+        min_speech_sec: float = 1.6,
+        silence_sec: float = 0.40,
+        silence_rms: float = 0.008,
+    ) -> Optional[np.ndarray]:
+        """
+        Thread-safely inspects the active recording buffer for a completed speech segment
+        followed by a natural pause (`silence_sec`). If found, slices and returns that
+        audio chunk so Whisper can transcribe it in the background while recording continues.
+        """
+        with self._lock:
+            if not self._is_recording or not self._frames:
+                return None
+
+            total_samples = sum(len(f) for f in self._frames)
+            min_total_samples = int((min_speech_sec + silence_sec) * self.sample_rate)
+            if total_samples < min_total_samples:
+                return None
+
+            target_silence_samples = int(silence_sec * self.sample_rate)
+            acc_silence = 0
+            silence_frame_count = 0
+
+            for frame in reversed(self._frames):
+                rms = float(np.sqrt(np.mean(frame**2))) if len(frame) > 0 else 0.0
+                if rms > silence_rms:
+                    return None
+                acc_silence += len(frame)
+                silence_frame_count += 1
+                if acc_silence >= target_silence_samples:
+                    break
+
+            if acc_silence < target_silence_samples or silence_frame_count >= len(self._frames):
+                return None
+
+            speech_end_idx = len(self._frames) - silence_frame_count
+            speech_frames = self._frames[:speech_end_idx]
+            speech_samples = sum(len(f) for f in speech_frames)
+            if speech_samples < int(min_speech_sec * self.sample_rate):
+                return None
+
+            # Verify that the speech portion actually contains voice energy above noise floor
+            has_voice = any(
+                (float(np.sqrt(np.mean(f**2))) if len(f) > 0 else 0.0) >= (silence_rms * 1.8)
+                for f in speech_frames
+            )
+            if not has_voice:
+                return None
+
+            # Keep last 2 silent frames (~100ms) in buffer as natural leading pad for next phrase
+            keep_tail = min(2, silence_frame_count)
+            cut_idx = len(self._frames) - keep_tail
+            chunk_frames = self._frames[:cut_idx]
+            self._frames = self._frames[cut_idx:]
+
+            audio = np.concatenate(chunk_frames, axis=0)
+            if self.channels > 1:
+                audio = np.mean(audio, axis=1)
+            else:
+                audio = audio.flatten()
+            return audio
+
     def stop(self) -> Optional[np.ndarray]:
         """
         Stop recording and return normalized 1D float32 numpy array of audio.

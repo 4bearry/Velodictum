@@ -202,3 +202,25 @@
 * **Status**: Accepted
 * **Context**: Packing developer configuration files into release builds risks leaking personal names, custom dictionaries, and API credentials to third parties.
 * **Decision**: Exclude `settings.json`, `snippets.json`, and `vocabulary.json` from PyInstaller data bundles in `build_executable.py` and `build.bat`. Destination machines automatically generate clean, neutral factory defaults on initial boot.
+
+---
+
+### ADR-022: Curated 3-Tier Model Catalog & Exact-First Slug Resolution
+* **Status**: Accepted
+* **Context**: Users required distinct model choices per performance category (speed vs balanced vs quality) without wrestling with unstructured 100+ model dropdowns, while substring matching caused greedy collisions (e.g. `gemini-2.5-flash` hijacking `gemini-2.5-flash-lite`).
+* **Decision**:
+  1. Structure models into 3 curated tiers: **Speed Priority** (< 250ms), **Balanced** (300–500ms), and **Highest Quality** (1–2s) with verified context limits, token pricing, and latency metrics.
+  2. Implement an interactive horizontal sub-model chip bar (`SubModelChip`) with 1-click selection directly below the priority cards.
+  3. Enforce **Exact-First Matching** in `formatting_providers.py` and `ai_formatter.py` to prevent prefix/substring collisions.
+  4. Adhere strictly to the Zero-Emoji design standard across all chips and headers.
+
+---
+
+### ADR-023: Zero-Pollution Win32 Clipboard Sequence Tracking & Dictation Clipboard Retention
+* **Status**: Accepted
+* **Context**: The text grabber previously injected sentinel strings (`__VELODICTUM_GRAB_...__`) which leaked into Windows Clipboard / `Win+V` history upon aborted grabs. Furthermore, aggressive 350ms clipboard restoration destroyed dictated text before users who lost window focus could paste it manually.
+* **Decision**:
+  1. Replace sentinel clipboard writes in `grab_selected_text_win32()` with the native Win32 `GetClipboardSequenceNumber()` API, ensuring 0% clipboard pollution or leaked strings.
+  2. Change default `restore_clipboard` to `False` in `InjectionConfig` so freshly formatted text remains in the Windows Clipboard for instant `Ctrl+V` pasting when focus on text fields is lost.
+  3. Enhance all GUI copy buttons with `safe_clipboard_copy()` (exponential backoff against OS clipboard locks) and visual confirmation feedback (*"Kopiert!"* for 1.5s).
+

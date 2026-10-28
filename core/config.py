@@ -96,6 +96,7 @@ class WhisperConfig:
     beam_size: int = 5
     vad_filter: bool = True
     hallucination_filter: bool = True  # Drops silence artifacts & repetition loops
+    streaming_chunks: bool = False  # Disabled by default to preserve full-utterance acoustic context for Whisper
     provider: str = "local"  # "local", "universal", "grok", "openai"
     models_dir: Optional[str] = None  # Custom storage directory for Whisper models
     # Universal STT API / Custom Endpoint
@@ -145,7 +146,7 @@ class HotkeyConfig:
 @dataclass
 class InjectionConfig:
     auto_paste: bool = True
-    restore_clipboard: bool = True
+    restore_clipboard: bool = False  # Keep freshly dictated text in clipboard so user can easily paste if focus was lost
     clipboard_restore_delay: float = 0.35
     clean_filler_words: bool = True
     apply_snippets: bool = True
@@ -157,7 +158,7 @@ class FormattingConfig:
     # Operating Modes: "flow" (AI Adaptive Flow with Context), "raw" (1:1 Whisper Bypass)
     mode: str = "flow"
     # Engines: "rules", "ollama", "universal", "openai", "gemini", "groq"
-    engine: str = "universal"  # Universal API (OpenRouter & Custom Endpoints) as permanent default
+    engine: str = "universal"  # Universal API (OpenAI-compatible generic endpoint interface)
     # Universal API (OpenAI-compatible generic endpoint interface)
     api_endpoint: str = "https://openrouter.ai/api/v1"
     api_key: Optional[str] = None
@@ -180,6 +181,8 @@ class FormattingConfig:
     workspace_seeding: bool = True  # Auto-seed active VS Code project & git branch into Whisper
     spoken_markdown: bool = True  # Expand 'Überschrift 2', 'Checkbox', 'Fett', etc.
     send_it_enabled: bool = True  # Allow 'und absenden' voice command to press Enter
+    voice_cancel_enabled: bool = True  # Allow 'verwerfen' / 'streich das' voice cancellation
+    smart_fast_path: bool = True  # Skip cloud LLM roundtrip for short, clean, already-punctuated phrases
     # Routing & Privacy Options (OpenRouter & Universal API)
     routing_strategy: str = "latency"  # "latency", "price", "throughput", "default"
     zero_data_retention: bool = True  # Enforce data_collection: "deny" and zdr: true
@@ -469,8 +472,10 @@ class AppConfig:
 
             def _safe(cls, d):
                 valid = {f.name for f in fields(cls)}
-                if cls == WhisperConfig and "backend" in d and "provider" not in d:
-                    d["provider"] = d["backend"]
+                if cls == WhisperConfig:
+                    if "backend" in d and "provider" not in d:
+                        d["provider"] = d["backend"]
+                    d["streaming_chunks"] = False
                 if cls == FormattingConfig:
                     if d.get("engine") == "openrouter":
                         d["engine"] = "universal"

@@ -195,8 +195,10 @@ def grab_selected_text_win32() -> str:
     """
     Robustly grabs currently highlighted/selected text from the active window by:
     1. Releasing any physical modifier keys (Alt, Shift, Ctrl, Win) held down during hotkey press.
-    2. Simulating clean Win32 Ctrl+C.
-    3. Polling clipboard with timeout to ensure target app processes the copy.
+    2. Tracking the Win32 clipboard sequence number or saving existing clipboard content.
+    3. Simulating clean Win32 Ctrl+C.
+    4. Polling clipboard with timeout to ensure target app processes the copy.
+    5. Never corrupting or polluting the clipboard with weird sentinel strings.
     """
     try:
         from ui_automation_context import is_sensitive_or_password_focused
@@ -212,9 +214,16 @@ def grab_selected_text_win32() -> str:
     _release_modifiers_win32()
     time.sleep(0.02)
 
-    # 2. Set temporary sentinel on clipboard
-    sentinel = f"__VELODICTUM_GRAB_{time.time()}__"
-    safe_clipboard_copy(sentinel)
+    # 2. Get initial clipboard sequence number & content
+    seq_before = 0
+    has_seq_api = hasattr(user32, "GetClipboardSequenceNumber")
+    if has_seq_api:
+        try:
+            seq_before = user32.GetClipboardSequenceNumber()
+        except Exception:
+            has_seq_api = False
+
+    orig_clip = safe_clipboard_paste()
 
     # 3. Simulate clean Ctrl+C
     user32.keybd_event(VK_CONTROL, 0, 0, 0)
@@ -227,11 +236,28 @@ def grab_selected_text_win32() -> str:
     start_t = time.time()
     grabbed = ""
     while time.time() - start_t < 0.14:
-        curr = safe_clipboard_paste()
-        if curr and curr != sentinel:
-            grabbed = curr
-            break
+        if has_seq_api:
+            try:
+                seq_now = user32.GetClipboardSequenceNumber()
+                if seq_now != seq_before:
+                    curr = safe_clipboard_paste()
+                    if curr:
+                        grabbed = curr
+                        break
+            except Exception:
+                pass
+        else:
+            curr = safe_clipboard_paste()
+            if curr and curr != orig_clip:
+                grabbed = curr
+                break
         time.sleep(0.015)
+
+    # 5. Non-destructive safety check: If nothing was copied, ensure original clipboard is preserved
+    if not grabbed and orig_clip:
+        curr_after = safe_clipboard_paste()
+        if curr_after != orig_clip:
+            safe_clipboard_copy(orig_clip)
 
     return grabbed
 
@@ -389,8 +415,15 @@ class TextInjector:
                     time.sleep(0.12)  # Wait for paste to register in chat before submitting
                     _send_enter_win32()
 
-            # 4. Restore original clipboard content non-destructively in background thread
-            if self.restore_clipboard and previous_clip is not None:
+            # 4. Restore original clipboard content non-destructively in background thread (if enabled)
+            should_restore = self.restore_clipboard
+            try:
+                from config import config
+                should_restore = getattr(config.injection, "restore_clipboard", self.restore_clipboard)
+            except Exception:
+                pass
+
+            if should_restore and previous_clip is not None:
                 def _restore(injected_sentinel: str, orig_clip: str):
                     time.sleep(self.restore_delay)
                     try:

@@ -235,6 +235,10 @@ class VelodictumCoreApp:
 
     def _sync_formatter_config(self):
         """Synchronize AIFormatter runtime attributes with current config."""
+        try:
+            self.config.load()
+        except Exception:
+            pass
         self.formatter.mode = self.config.formatting.mode
         self.formatter.engine = self.config.formatting.engine
         self.formatter.api_endpoint = getattr(self.config.formatting, "api_endpoint", "https://openrouter.ai/api/v1")
@@ -519,7 +523,8 @@ class VelodictumCoreApp:
                 }
                 signals.voice_edit_completed.emit(payload)
             else:
-                signals.transcription_failed.emit(tr("hud_transform_not_possible"))
+                err_msg = getattr(self.voice_editor, "last_error", None) or tr("hud_transform_not_possible")
+                signals.transcription_failed.emit(err_msg)
         except Exception as e:
             signals.transcription_failed.emit(str(e))
         finally:

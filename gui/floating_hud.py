@@ -1,13 +1,24 @@
 """
-Velodictum - Minimalist Floating HUD Indicator (Dark Neomorphism 2.0 Edition)
-Calm, compact, non-intrusive floating indicator with tactile neomorphic surfaces,
-physics-based spring morphing, and responsive audio level metering.
+Velodictum - Minimalist Floating HUD Indicator (Dark Neomorphism 2.0 & Liquid Optical Glass Edition)
+Calm, compact, non-intrusive floating indicator with Siri-inspired translucent smoked glass optics,
+prismatic horizon caustic refraction, physics-based spring morphing, and responsive audio level metering.
 """
 import math
 import time
 from typing import Optional
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF
-from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QLinearGradient, QFont, QFontMetrics, QPainterPath
+from PyQt6.QtCore import Qt, QTimer, QPoint, QPointF, QRectF
+from PyQt6.QtGui import (
+    QPainter,
+    QColor,
+    QBrush,
+    QPen,
+    QLinearGradient,
+    QRadialGradient,
+    QFont,
+    QFontMetrics,
+    QPainterPath,
+    QPixmap,
+)
 from PyQt6.QtWidgets import QWidget, QApplication
 from config import config
 from gui.signals import signals
@@ -28,6 +39,7 @@ class FloatingHUD(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
         try:
             import ctypes
@@ -36,9 +48,9 @@ class FloatingHUD(QWidget):
         except Exception:
             pass
 
-        # Transparent Canvas Dimensions (Accommodates dynamic spring expansions, user scaling & rubber overshoot)
+        # Transparent Canvas Dimensions (Accommodates dynamic spring expansions, vertical emergence & rubber overshoot)
         self.canvas_w = 460
-        self.canvas_h = 68
+        self.canvas_h = 76
         self.resize(self.canvas_w, self.canvas_h)
 
         # States: "hidden", "recording", "voice_edit", "transcribing", "done"
@@ -47,13 +59,13 @@ class FloatingHUD(QWidget):
         self.sub_text = ""
         self.recording_start_time = 0.0
 
-        # --- Physics-based Spring State ---
-        self.current_w = 40.0
-        self.target_w = 40.0
+        # --- Physics-based Spring State (Apple Fluid Unfolding & Vertical Emergence) ---
+        self.current_w = 36.0
+        self.target_w = 36.0
         self.vel_w = 0.0
 
-        self.current_h = 32.0
-        self.target_h = 32.0
+        self.current_h = 28.0
+        self.target_h = 36.0
         self.vel_h = 0.0
 
         self.current_scale = 0.0
@@ -64,7 +76,29 @@ class FloatingHUD(QWidget):
         self.target_opacity = 0.0
         self.vel_opacity = 0.0
 
-        # Audio visualizer reactive bars
+        self.current_y_offset = 18.0
+        self.target_y_offset = 18.0
+        self.vel_y = 0.0
+
+        # --- Tactile Hover & Press Micro-Interactions ---
+        self._is_hovered = False
+        self.current_interaction_scale = 1.0
+        self.target_interaction_scale = 1.0
+        self.vel_interaction_scale = 0.0
+        self.current_hover_glow = 0.0
+        self.target_hover_glow = 0.0
+
+        # --- Smooth RGB Accent Color Lerp & Progressive Icon Stroke ---
+        self._accent_r = 235.0
+        self._accent_g = 94.0
+        self._accent_b = 56.0
+        self.icon_draw_progress = 1.0
+
+        # --- Frosted Optical Glass Backdrop Cache ---
+        self._frosted_backdrop: Optional[QPixmap] = None
+        self._last_backdrop_grab_time = 0.0
+
+        # Audio visualizer reactive bars (Symmetrical 7-bar Apple Voice-Wave)
         self.num_bars = 7
         self.bar_heights = [0.15] * self.num_bars
         self.current_rms = 0.0
@@ -235,12 +269,31 @@ class FloatingHUD(QWidget):
                 g = screen.availableGeometry()
                 self.move(g.x() + (g.width() - self.canvas_w) // 2, g.y() + g.height() - self.canvas_h - 70)
 
+    def enterEvent(self, event):
+        self._is_hovered = True
+        self.target_interaction_scale = 1.028
+        self.target_hover_glow = 1.0
+        if self.state != "hidden" and not self.anim_timer.isActive():
+            self.anim_timer.start(16)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._is_hovered = False
+        self.target_interaction_scale = 1.0
+        self.target_hover_glow = 0.0
+        if self.state != "hidden" and not self.anim_timer.isActive():
+            self.anim_timer.start(16)
+        super().leaveEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_start_pos = event.globalPosition().toPoint()
             self._win_start_pos = self.pos()
             self._is_dragging = False
             self._mouse_pressed = True
+            self.target_interaction_scale = 0.96
+            if self.state != "hidden" and not self.anim_timer.isActive():
+                self.anim_timer.start(16)
             event.accept()
 
     def mouseMoveEvent(self, event):
@@ -252,6 +305,11 @@ class FloatingHUD(QWidget):
                 event.accept()
 
     def mouseReleaseEvent(self, event):
+        self.target_interaction_scale = 1.028 if self._is_hovered else 1.0
+        self.vel_interaction_scale = 1.4
+        if self.state != "hidden" and not self.anim_timer.isActive():
+            self.anim_timer.start(16)
+
         if event.button() == Qt.MouseButton.RightButton:
             # Right Click -> Immediate Cancel / Discard
             if self.state in ("recording", "voice_edit"):
@@ -321,7 +379,7 @@ class FloatingHUD(QWidget):
                 self.sub_text = tr("hud_instruction")
                 is_minimal = getattr(config.hud, "minimal_mode", False)
                 is_en = (get_current_language() == "en")
-                self.target_w = 64.0 if is_minimal else (170.0 if is_en else 188.0)
+                self.target_w = 64.0 if is_minimal else self._compute_pill_width(min_w=(170.0 if is_en else 188.0), max_w=290.0, pad=82.0, use_done_fonts=False)
             elif self.state == "transcribing":
                 if getattr(self, "_is_formatting", False) or "format" in (self.status_text or "").lower():
                     self.status_text = tr("hud_formatting")
@@ -388,18 +446,91 @@ class FloatingHUD(QWidget):
 
     def _compute_pill_width(self, min_w: float = 188.0, max_w: float = 380.0, pad: float = 64.0, use_done_fonts: bool = True) -> float:
         """
-        Computes required target_w so that even when user_scale < 1.0 (e.g. 88%),
-        the rendered pill draw_w is guaranteed to fit both status_text and sub_text without clipping.
+        Computes required target_w for the Apple single-axis horizontal layout
+        (left indicator + primary status_text + breathing gap + right-aligned sub_text badge)
+        so both strings sit comfortably on one line without clipping, clamped to [min_w, max_w].
         """
         t_font = self.done_title_font if use_done_fonts else self.title_font
         s_font = self.done_sub_font if use_done_fonts else self.sub_font
         text_w = QFontMetrics(t_font).horizontalAdvance(self.status_text or "")
         sub_w = QFontMetrics(s_font).horizontalAdvance(self.sub_text or "")
-        needed_px = max(min_w, float(max(text_w, sub_w)) + pad)
+        single_line_px = float(text_w + (sub_w + 26.0 if sub_w > 0 else 0.0)) + pad
+        needed_px = max(min_w, single_line_px)
         user_scale = max(0.85, min(1.15, getattr(config.hud, "scale_percent", 100) / 100.0))
         if user_scale < 1.0:
             needed_px = needed_px / user_scale
         return min(max_w, needed_px)
+
+    def _capture_frosted_backdrop(self):
+        """
+        Captures the desktop patch directly behind the HUD before it appears and applies
+        a two-pass smooth downscale/upscale Gaussian-like optical blur for true frosted glass.
+        Safely skipped in headless/offscreen test environments.
+        """
+        try:
+            app = QApplication.instance()
+            if not app or app.platformName().lower() in ("offscreen", "minimal"):
+                return
+            now = time.perf_counter()
+            if now - self._last_backdrop_grab_time < 0.35:
+                return
+            self._last_backdrop_grab_time = now
+
+            scr = QApplication.screenAt(self.geometry().center()) or QApplication.primaryScreen()
+            if not scr:
+                return
+            raw_pix = scr.grabWindow(0, self.x(), self.y(), self.canvas_w, self.canvas_h)
+            if raw_pix.isNull() or raw_pix.width() < 16 or raw_pix.height() < 16:
+                return
+            # Two-pass optical downscale/upscale blur (10x reduction -> smooth upscale)
+            small_w = max(4, raw_pix.width() // 10)
+            small_h = max(2, raw_pix.height() // 10)
+            mid_w = max(8, raw_pix.width() // 4)
+            mid_h = max(4, raw_pix.height() // 4)
+            p1 = raw_pix.scaled(small_w, small_h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            p2 = p1.scaled(mid_w, mid_h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self._frosted_backdrop = p2.scaled(
+                raw_pix.width(), raw_pix.height(),
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+        except Exception:
+            self._frosted_backdrop = None
+
+    def _prepare_apple_emergence(self, is_minimal: bool):
+        """
+        Initializes Apple-style bottom-up spring emergence and seed-to-capsule unfolding
+        when the HUD wakes up from a hidden or collapsed state.
+        """
+        self.target_h = 36.0
+        self.target_scale = 1.0
+        self.target_opacity = 1.0
+        self.target_y_offset = 0.0
+
+        fluid_enabled = getattr(config.hud, "fluid_animations", True) and not is_reduced_motion(config)
+        if self.state in ("done", "prompt", "cancelled", "error"):
+            self.icon_draw_progress = 0.0 if fluid_enabled else 1.0
+
+        is_bottom = (getattr(config.hud, "position_mode", "bottom_center") == "bottom_center")
+        if not self.isVisible() or self.current_scale < 0.15 or self.current_opacity < 0.15:
+            # Snap initial accent color when waking from hidden so it starts clean
+            accent = self._get_state_accent_color()
+            self._accent_r = float(accent.red())
+            self._accent_g = float(accent.green())
+            self._accent_b = float(accent.blue())
+
+            # Start as a compact optical seed lower down, rising and unfolding simultaneously
+            self.current_w = 34.0 if is_minimal else 42.0
+            self.current_h = 26.0
+            self.current_scale = 0.44
+            self.current_opacity = 0.0
+            self.current_y_offset = 18.0 if is_bottom else 10.0
+
+            self.vel_w = 85.0 if is_minimal else 155.0
+            self.vel_h = 60.0
+            self.vel_scale = 3.0
+            self.vel_opacity = 4.2
+            self.vel_y = -150.0 if is_bottom else -95.0
 
     def on_recording_started(self):
         if not getattr(config.hud, "enabled", True):
@@ -415,20 +546,12 @@ class FloatingHUD(QWidget):
         self.hide_timer.stop()
 
         is_minimal = getattr(config.hud, "minimal_mode", False)
-        self.target_w = 64.0 if is_minimal else self._compute_pill_width(min_w=156.0, max_w=260.0, pad=84.0, use_done_fonts=False)
-        self.target_h = 36.0
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
-
-        if not self.isVisible() or self.current_scale < 0.1:
-            self.current_w = 50.0 if is_minimal else 80.0
-            self.current_h = 34.0
-            self.current_scale = 0.50
-            self.current_opacity = 0.0
-            self.vel_w = 100.0  # Controlled, elegant initial impulse
-            self.vel_scale = 2.5
-
+        self.target_w = 64.0 if is_minimal else self._compute_pill_width(min_w=172.0, max_w=260.0, pad=76.0, use_done_fonts=False)
         self._update_hud_position()
+        if not self.isVisible():
+            self._capture_frosted_backdrop()
+        self._prepare_apple_emergence(is_minimal)
+
         self.show()
         if not self.anim_timer.isActive():
             self.anim_timer.start(16)
@@ -449,35 +572,32 @@ class FloatingHUD(QWidget):
 
         is_minimal = getattr(config.hud, "minimal_mode", False)
         is_en = (get_current_language() == "en")
-        base_w = 170.0 if is_en else 188.0
-        self.target_w = 64.0 if is_minimal else self._compute_pill_width(min_w=base_w, max_w=280.0, pad=84.0, use_done_fonts=False)
-        self.target_h = 36.0
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
-
-        if not self.isVisible() or self.current_scale < 0.1:
-            self.current_w = 50.0 if is_minimal else 80.0
-            self.current_h = 34.0
-            self.current_scale = 0.50
-            self.current_opacity = 0.0
-            self.vel_w = 100.0
-            self.vel_scale = 2.5
-
+        base_w = 186.0 if is_en else 204.0
+        self.target_w = 64.0 if is_minimal else self._compute_pill_width(min_w=base_w, max_w=290.0, pad=76.0, use_done_fonts=False)
         self._update_hud_position()
+        if not self.isVisible():
+            self._capture_frosted_backdrop()
+        self._prepare_apple_emergence(is_minimal)
+
         self.show()
         if not self.anim_timer.isActive():
             self.anim_timer.start(16)
         self.update()
 
     def _trigger_morph_impulse(self, impulse_scale: float = 0.5):
-        """Triggers a subtle, silky-smooth elastic pop and micro-crossfade on state changes."""
+        """Triggers an Apple-style elastic morph pulse, subtle upward buoyancy hop, content crossfade, and icon stroke draw."""
         if getattr(config.hud, "fluid_animations", True) and not is_reduced_motion(config):
             self.vel_scale = impulse_scale
+            self.vel_y = -28.0 * impulse_scale
             self._is_crossfading = True
             self._crossfade_time = 0.0
             self.content_fade_alpha = 0.0
+            if self.state in ("done", "prompt", "cancelled", "error"):
+                self.icon_draw_progress = 0.0
             if not self.anim_timer.isActive():
                 self.anim_timer.start(16)
+        else:
+            self.icon_draw_progress = 1.0
 
     def on_recording_stopped(self):
         if self.state in ("recording", "voice_edit"):
@@ -490,6 +610,7 @@ class FloatingHUD(QWidget):
             is_minimal = getattr(config.hud, "minimal_mode", False)
             self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=148.0, max_w=240.0, pad=56.0, use_done_fonts=False)
             self.target_h = 36.0
+            self.target_y_offset = 0.0
             self._trigger_morph_impulse(0.4)
             self.update()
 
@@ -508,7 +629,7 @@ class FloatingHUD(QWidget):
         self.sub_text = "Whisper"
         is_minimal = getattr(config.hud, "minimal_mode", False)
         self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=148.0, max_w=240.0, pad=56.0, use_done_fonts=False)
-        self.target_h = 36.0
+        self._prepare_apple_emergence(is_minimal)
         self.show()
         if not self.anim_timer.isActive():
             self.anim_timer.start(16)
@@ -524,6 +645,7 @@ class FloatingHUD(QWidget):
         is_minimal = getattr(config.hud, "minimal_mode", False)
         self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=154.0, max_w=250.0, pad=56.0, use_done_fonts=False)
         self.target_h = 36.0
+        self.target_y_offset = 0.0
         self._trigger_morph_impulse(0.3)
         self.update()
 
@@ -548,6 +670,7 @@ class FloatingHUD(QWidget):
         else:
             self.target_w = self._compute_pill_width(min_w=172.0, max_w=340.0, pad=62.0)
         self.target_h = 36.0
+        self.target_y_offset = 0.0
 
         self._trigger_morph_impulse(0.5)
         self.update()
@@ -564,6 +687,7 @@ class FloatingHUD(QWidget):
         is_minimal = getattr(config.hud, "minimal_mode", False)
         self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=176.0, max_w=300.0, pad=62.0)
         self.target_h = 36.0
+        self.target_y_offset = 0.0
         self._trigger_morph_impulse(0.5)
         self.update()
         self.hide_timer.start(2200)
@@ -580,7 +704,7 @@ class FloatingHUD(QWidget):
             self.sub_text = tr("hud_nothing_reverted")
         is_minimal = getattr(config.hud, "minimal_mode", False)
         self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=168.0, max_w=300.0, pad=62.0)
-        self.target_h = 36.0
+        self._prepare_apple_emergence(is_minimal)
         self._trigger_morph_impulse(0.5)
         self._update_hud_position()
         self.show()
@@ -597,8 +721,6 @@ class FloatingHUD(QWidget):
         self.status_text = tr("hud_mic_switched")
         self.sub_text = (device_name or tr("hud_default_mic"))[:26]
 
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
         self.hide_timer.stop()
 
         is_minimal = getattr(config.hud, "minimal_mode", False)
@@ -607,16 +729,7 @@ class FloatingHUD(QWidget):
         else:
             self.target_w = self._compute_pill_width(min_w=200.0, max_w=360.0, pad=64.0)
 
-        self.target_h = 36.0
-
-        if not self.isVisible() or self.current_scale < 0.1 or self.current_opacity < 0.1:
-            self.current_w = 50.0 if is_minimal else 80.0
-            self.current_h = 34.0
-            self.current_scale = 0.60
-            self.current_opacity = 0.1
-            self.vel_w = 120.0
-            self.vel_scale = 2.8
-
+        self._prepare_apple_emergence(is_minimal)
         self._trigger_morph_impulse(0.5)
         self._update_hud_position()
         self.show()
@@ -635,7 +748,7 @@ class FloatingHUD(QWidget):
         self.sub_text = word[:22]
         is_minimal = getattr(config.hud, "minimal_mode", False)
         self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=185.0, max_w=320.0, pad=62.0)
-        self.target_h = 36.0
+        self._prepare_apple_emergence(is_minimal)
         self._trigger_morph_impulse(0.5)
         self._update_hud_position()
         self.show()
@@ -660,8 +773,6 @@ class FloatingHUD(QWidget):
         self.status_text = tr("hud_vocab_prompt_title", word=word)
         self.sub_text = tr("hud_vocab_prompt_save_orig", orig=orig) if orig else tr("hud_vocab_prompt_save")
 
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
         self.hide_timer.stop()
 
         is_minimal = getattr(config.hud, "minimal_mode", False)
@@ -670,16 +781,7 @@ class FloatingHUD(QWidget):
         else:
             self.target_w = self._compute_pill_width(min_w=210.0, max_w=380.0, pad=64.0)
 
-        self.target_h = 36.0
-
-        if not self.isVisible() or self.current_scale < 0.1 or self.current_opacity < 0.1:
-            self.current_w = 50.0 if is_minimal else 80.0
-            self.current_h = 34.0
-            self.current_scale = 0.60
-            self.current_opacity = 0.1
-            self.vel_w = 120.0
-            self.vel_scale = 2.8
-
+        self._prepare_apple_emergence(is_minimal)
         self._trigger_morph_impulse(0.6)
         self._update_hud_position()
         self.show()
@@ -696,12 +798,10 @@ class FloatingHUD(QWidget):
         self.shake_offset = 0.0
         self.status_text = tr("hud_cancelled")
         self.sub_text = tr("hud_recording_discarded")
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
         self.hide_timer.stop()
         is_minimal = getattr(config.hud, "minimal_mode", False)
         self.target_w = 40.0 if is_minimal else self._compute_pill_width(min_w=180.0, max_w=320.0, pad=62.0)
-        self.target_h = 36.0
+        self._prepare_apple_emergence(is_minimal)
         self._trigger_morph_impulse(0.5)
         self._update_hud_position()
         self.show()
@@ -721,6 +821,14 @@ class FloatingHUD(QWidget):
         elif "kein text" in low_msg or "keine auswahl" in low_msg or "no text" in low_msg:
             self.status_text = tr("hud_no_text_selected")
             self.sub_text = tr("hud_select_text_first")
+        elif "api-key" in low_msg or "api key" in low_msg:
+            from core.i18n import get_current_language
+            self.status_text = "API-Key fehlt" if get_current_language() == "de" else "API Key Missing"
+            self.sub_text = "In Einstellungen eintragen" if get_current_language() == "de" else "Configure in Settings"
+        elif "ollama" in low_msg:
+            from core.i18n import get_current_language
+            self.status_text = "Ollama offline"
+            self.sub_text = "Ollama starten" if get_current_language() == "de" else "Start Ollama"
         else:
             self.status_text = tr("hud_error")
             self.sub_text = err_msg[:48]
@@ -730,9 +838,7 @@ class FloatingHUD(QWidget):
             self.target_w = 40.0
         else:
             self.target_w = self._compute_pill_width(min_w=196.0, max_w=380.0, pad=64.0)
-        self.target_h = 36.0
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
+        self._prepare_apple_emergence(is_minimal)
 
         # Lateral Refusal Shake Animation ONLY for error
         self.shake_time = 0.0
@@ -757,9 +863,7 @@ class FloatingHUD(QWidget):
             self.target_w = 40.0
         else:
             self.target_w = self._compute_pill_width(min_w=200.0, max_w=380.0, pad=64.0)
-        self.target_h = 36.0
-        self.target_scale = 1.0
-        self.target_opacity = 1.0
+        self._prepare_apple_emergence(is_minimal)
 
         # Lateral Refusal Shake Animation
         self.shake_time = 0.0
@@ -774,10 +878,20 @@ class FloatingHUD(QWidget):
         self.hide_timer.start(2200)
 
     def hide_hud(self):
-        # Controlled, clean collapse
+        # Apple Dynamic Island / Siri Bubble retraction: fold back into a compact seed & sink downward
+        is_bottom = (getattr(config.hud, "position_mode", "bottom_center") == "bottom_center")
+        self.target_w = 34.0
+        self.vel_w = -125.0
+        self.target_y_offset = 16.0 if is_bottom else 8.0
+        self.vel_y = 75.0
         self.target_scale = 0.0
         self.target_opacity = 0.0
-        self.vel_scale = -2.5
+        self.vel_scale = -3.2
+        self.vel_opacity = -3.0
+        self._is_hovered = False
+        self.target_interaction_scale = 1.0
+        self.target_hover_glow = 0.0
+        self._frosted_backdrop = None
         self.state = "hidden"
         self._last_anim_time = None
         self._is_crossfading = False
@@ -793,17 +907,35 @@ class FloatingHUD(QWidget):
 
         fluid_enabled = getattr(config.hud, "fluid_animations", True) and not is_reduced_motion(config)
 
-        # Micro-Crossfade interpolation (75ms smoothstep for ultra-fluid content morphs)
+        # Micro-Crossfade interpolation (85ms smoothstep for ultra-fluid Apple content morphs)
         if self._is_crossfading and fluid_enabled:
             self._crossfade_time += dt
-            progress = min(1.0, self._crossfade_time / 0.075)
+            progress = min(1.0, self._crossfade_time / 0.085)
             self.content_fade_alpha = progress * progress * (3.0 - 2.0 * progress)
-            if self._crossfade_time >= 0.075:
+            if self._crossfade_time >= 0.085:
                 self._is_crossfading = False
                 self.content_fade_alpha = 1.0
         else:
             self._is_crossfading = False
             self.content_fade_alpha = 1.0
+
+        # Progressive badge icon stroke animation (~160ms)
+        if fluid_enabled and self.icon_draw_progress < 1.0:
+            self.icon_draw_progress = min(1.0, self.icon_draw_progress + max(0.014, dt) / 0.16)
+        elif not fluid_enabled:
+            self.icon_draw_progress = 1.0
+
+        # Smooth RGB Accent Color Interpolation across states
+        target_accent = self._get_state_accent_color()
+        if fluid_enabled:
+            lerp_t = min(1.0, dt * 14.0)
+            self._accent_r += (float(target_accent.red()) - self._accent_r) * lerp_t
+            self._accent_g += (float(target_accent.green()) - self._accent_g) * lerp_t
+            self._accent_b += (float(target_accent.blue()) - self._accent_b) * lerp_t
+        else:
+            self._accent_r = float(target_accent.red())
+            self._accent_g = float(target_accent.green())
+            self._accent_b = float(target_accent.blue())
 
         # Lateral Refusal Shake
         if self.is_shaking and fluid_enabled:
@@ -820,12 +952,13 @@ class FloatingHUD(QWidget):
         if fluid_enabled:
             # Dynamically calculate damping based on user bounce setting (0=minimal/calm, 50=balanced default, 100=elastic)
             bounce_factor = getattr(config.hud, "bounce_intensity", 50) / 100.0
-            cw = 28.0 - (11.5 * bounce_factor)
-            ch = 30.0 - (12.0 * bounce_factor)
-            cs = 29.0 - (12.0 * bounce_factor)
+            cw = 27.0 - (11.5 * bounce_factor)
+            ch = 29.0 - (11.5 * bounce_factor)
+            cs = 28.0 - (11.5 * bounce_factor)
+            cy_damp = 26.0 - (10.5 * bounce_factor)
 
-            # 1. Width Spring
-            kw = 320.0
+            # 1. Width Spring (Apple capsule horizontal unfolding)
+            kw = 330.0
             fw = -kw * (self.current_w - self.target_w) - cw * self.vel_w
             self.vel_w += fw * dt
             self.current_w += self.vel_w * dt
@@ -846,18 +979,38 @@ class FloatingHUD(QWidget):
             ks = 330.0
             fs = -ks * (self.current_scale - self.target_scale) - cs * self.vel_scale
             self.vel_scale += fs * dt
-            self.current_scale = max(0.0, min(1.20, self.current_scale + self.vel_scale * dt))
+            self.current_scale = max(0.0, min(1.22, self.current_scale + self.vel_scale * dt))
             if abs(self.current_scale - self.target_scale) < 0.005 and abs(self.vel_scale) < 0.01:
                 self.current_scale = self.target_scale
                 self.vel_scale = 0.0
 
             # 4. Opacity Spring
-            fo = -280.0 * (self.current_opacity - self.target_opacity) - 24.0 * self.vel_opacity
+            fo = -290.0 * (self.current_opacity - self.target_opacity) - 24.0 * self.vel_opacity
             self.vel_opacity += fo * dt
             self.current_opacity = max(0.0, min(1.0, self.current_opacity + self.vel_opacity * dt))
             if abs(self.current_opacity - self.target_opacity) < 0.005 and abs(self.vel_opacity) < 0.01:
                 self.current_opacity = self.target_opacity
                 self.vel_opacity = 0.0
+
+            # 5. Vertical Emergence / Buoyancy Spring (Apple bottom-edge rise & sink)
+            ky = 310.0
+            fy = -ky * (self.current_y_offset - self.target_y_offset) - cy_damp * self.vel_y
+            self.vel_y += fy * dt
+            self.current_y_offset = max(-10.0, min(28.0, self.current_y_offset + self.vel_y * dt))
+            if abs(self.current_y_offset - self.target_y_offset) < 0.15 and abs(self.vel_y) < 0.2:
+                self.current_y_offset = self.target_y_offset
+                self.vel_y = 0.0
+
+            # 6. Tactile Hover & Click Interaction Scale Spring
+            k_int = 390.0
+            f_int = -k_int * (self.current_interaction_scale - self.target_interaction_scale) - 24.0 * self.vel_interaction_scale
+            self.vel_interaction_scale += f_int * dt
+            self.current_interaction_scale = max(0.90, min(1.10, self.current_interaction_scale + self.vel_interaction_scale * dt))
+            if abs(self.current_interaction_scale - self.target_interaction_scale) < 0.002 and abs(self.vel_interaction_scale) < 0.01:
+                self.current_interaction_scale = self.target_interaction_scale
+                self.vel_interaction_scale = 0.0
+
+            self.current_hover_glow += (self.target_hover_glow - self.current_hover_glow) * min(1.0, dt * 14.0)
 
         else:
             # Instant rigid fallback / Reduced-Motion
@@ -865,6 +1018,9 @@ class FloatingHUD(QWidget):
             self.current_h = self.target_h
             self.current_scale = self.target_scale
             self.current_opacity = self.target_opacity
+            self.current_y_offset = self.target_y_offset
+            self.current_interaction_scale = self.target_interaction_scale
+            self.current_hover_glow = self.target_hover_glow
 
         # Check if fully hidden and settled -> Stop timer to save 100% CPU!
         if self.state == "hidden" and self.current_scale < 0.02 and self.current_opacity < 0.02:
@@ -872,32 +1028,48 @@ class FloatingHUD(QWidget):
             self.anim_timer.stop()
             return
 
-        if self.state == "recording":
-            dur = int(time.time() - self.recording_start_time)
-            m, s = divmod(dur, 60)
-            self.sub_text = f"{m:02d}:{s:02d}"
+        if self.state in ("recording", "voice_edit"):
+            if self.state == "recording":
+                dur = int(time.time() - self.recording_start_time)
+                m, s = divmod(dur, 60)
+                self.sub_text = f"{m:02d}:{s:02d}"
 
             self.current_rms += (self.target_rms - self.current_rms) * 0.35
             if self.current_rms < 0.03:
-                # Silence / quiet room: static clean baseline with zero jitter
+                # Silence / quiet room: calm uniform micro-dots with zero jitter
                 for i in range(self.num_bars):
-                    self.bar_heights[i] += (0.12 - self.bar_heights[i]) * 0.25
+                    self.bar_heights[i] += (0.15 - self.bar_heights[i]) * 0.25
             else:
-                # Active speech: calm reactive audio waveform shaped by human vocal formant envelope
-                t = time.time() * (2.5 if not fluid_enabled else 8.0)
-                weights_7 = (0.75, 0.85, 0.95, 1.0, 0.95, 0.85, 0.75)
+                # Active speech: symmetrical Apple Voice-Wave bell envelope radiating from center bar (index 3)
+                t = time.time() * (2.5 if not fluid_enabled else 8.2)
+                weights_7 = (0.38, 0.64, 0.88, 1.00, 0.88, 0.64, 0.38)
                 for i in range(self.num_bars):
                     w_factor = weights_7[i] if i < len(weights_7) else 1.0
-                    wave = math.sin(t + i * 0.75) * 0.25 + 0.75 if fluid_enabled else 0.85
-                    target_h = max(0.12, min(1.0, self.current_rms * wave * 1.25 * w_factor))
+                    dist_from_center = abs(i - 3)
+                    wave = math.sin(t - dist_from_center * 0.55) * 0.25 + 0.75 if fluid_enabled else 0.85
+                    target_h = max(0.15, min(1.0, self.current_rms * wave * 1.28 * w_factor))
                     self.bar_heights[i] += (target_h - self.bar_heights[i]) * 0.45
 
         elif self.state == "transcribing":
-            # Slower, calmer sweep with an elegant pause between sweeps (~3.5 seconds total period)
+            # Smooth optical caustic sweep across the glass lens (~3.2 seconds total period)
             if fluid_enabled:
                 self.shimmer_phase = (self.shimmer_phase + 0.009) % 2.2
 
         self.update()
+
+    def _get_state_accent_color(self) -> QColor:
+        """Returns the semantic accent QColor for the active HUD state."""
+        if self.state == "recording":
+            return QColor("#eb5e38")  # Velodictum Coral
+        elif self.state in ("voice_edit", "transcribing"):
+            return QColor("#7c83e0")  # Muted Indigo
+        elif self.state == "done":
+            return QColor("#34d399")  # Mint / Emerald
+        elif self.state == "prompt":
+            return QColor("#f59e0b")  # Amber
+        elif self.state in ("cancelled", "error"):
+            return QColor("#ef4444")  # Crimson
+        return QColor("#64748b")
 
     def paintEvent(self, event):
         if self.current_scale < 0.01 or self.current_opacity < 0.01:
@@ -917,79 +1089,144 @@ class FloatingHUD(QWidget):
         fluid_enabled = getattr(config.hud, "fluid_animations", True) and not is_reduced_motion(config)
         user_scale = max(0.85, min(1.15, getattr(config.hud, "scale_percent", 100) / 100.0))
 
-        # Subtle volume preservation during expansion
-        squish = max(-0.04, min(0.04, -self.vel_w * 0.0001)) if fluid_enabled else 0.0
-        
-        # Exact integer pixel snapping to eliminate text/icon subpixel wobble + lateral refusal shake
-        draw_w = round(max(16.0, self.current_w * self.current_scale * user_scale))
-        draw_h = round(max(16.0, self.current_h * (1.0 + squish) * self.current_scale * user_scale))
+        # Respect user's HUD glass density setting (65% to 95%, default 78%)
+        raw_op = getattr(config.hud, "opacity_percent", 78)
+        glass_density = max(0.55, min(0.96, (raw_op if isinstance(raw_op, (int, float)) else 78) / 100.0))
+        norm_density = (glass_density - 0.55) / 0.41  # 0.0 (lightest glass) -> 1.0 (densest smoked glass)
+
+        # Apple Anisotropic Squash & Stretch (couples horizontal expansion vel_w and vertical rise vel_y)
+        if fluid_enabled:
+            squish_y = max(-0.045, min(0.045, -self.vel_w * 0.00010 - self.vel_y * 0.00018))
+            squish_x = max(-0.035, min(0.035, self.vel_y * 0.00012))
+            y_off = self.current_y_offset
+        else:
+            squish_y = 0.0
+            squish_x = 0.0
+            y_off = 0.0
+
+        # Exact integer pixel snapping + tactile hover/press scale + lateral refusal shake + vertical rise
+        interact_s = self.current_interaction_scale
+        draw_w = round(max(16.0, self.current_w * (1.0 + squish_x) * self.current_scale * interact_s * user_scale))
+        draw_h = round(max(16.0, self.current_h * (1.0 + squish_y) * self.current_scale * interact_s * user_scale))
         rx = round(cx - draw_w / 2.0 + self.shake_offset)
-        ry = round(cy - draw_h / 2.0)
+        ry = round(max(2.0, min(h - draw_h - 4.0, cy - draw_h / 2.0 + y_off)))
 
         rect = QRectF(rx, ry, draw_w, draw_h)
         radius = draw_h / 2.0
 
-        # 0. Dark Neomorphism 2.0 Dual Shadow Base
+        pill_path = QPainterPath()
+        pill_path.addRoundedRect(rect, radius, radius)
+
+        # Live smoothly interpolated semantic accent color
+        live_accent = QColor(
+            max(0, min(255, int(round(self._accent_r)))),
+            max(0, min(255, int(round(self._accent_g)))),
+            max(0, min(255, int(round(self._accent_b)))),
+        )
+        is_minimal = getattr(config.hud, "minimal_mode", False)
+        vocal_bloom = max(0.0, min(1.0, (self.current_rms - 0.15) / 0.65)) if self.state in ("recording", "voice_edit") else 0.0
+
+        # =========================================================================
+        # 0. Exterior Soft Drop Shadow (Clipped strictly OUTSIDE the glass pill)
+        #    Keeps the semi-transparent glass interior completely clean and un-mudded.
+        # =========================================================================
+        painter.save()
+        canvas_path = QPainterPath()
+        canvas_path.addRect(0.0, 0.0, w, h)
+        painter.setClipPath(canvas_path.subtracted(pill_path))
         painter.setPen(Qt.PenStyle.NoPen)
-        # Top-left subtle ambient light rim
-        painter.setBrush(QBrush(QColor(46, 56, 86, 40)))
-        painter.drawRoundedRect(rect.adjusted(-1.0, -1.0, 0.5, 0.5), radius + 1.0, radius + 1.0)
-        # Bottom-right deep graphite drop shadow
-        painter.setBrush(QBrush(QColor(3, 5, 10, 120)))
-        painter.drawRoundedRect(rect.adjusted(0.5, 1.5, 2.5, 4.0), radius + 1.5, radius + 1.5)
-        painter.setBrush(QBrush(QColor(3, 5, 10, 165)))
-        painter.drawRoundedRect(rect.adjusted(0.0, 1.0, 1.0, 2.0), radius + 0.5, radius + 0.5)
 
-        # 1. Tactile Neomorphic Graphite Surface (Solid deep blue-black / graphite gradient, no glass blur)
+        painter.setBrush(QBrush(QColor(2, 4, 10, 48)))
+        painter.drawRoundedRect(rect.adjusted(-2.0, 0.5, 2.0, 4.5), radius + 2.0, radius + 2.0)
+        painter.setBrush(QBrush(QColor(2, 4, 10, 82)))
+        painter.drawRoundedRect(rect.adjusted(-0.8, 1.0, 0.8, 2.5), radius + 0.8, radius + 0.8)
+        painter.restore()
+
+        # =========================================================================
+        # 1. Frosted Backdrop Blur + Clean, Noble Smoked-Glass Capsule Body
+        #    Deep grounded obsidian-black at the top fading smoothly and neutrally
+        #    into a calm, semi-transparent smoked glass lower half — zero middle glare!
+        # =========================================================================
+        painter.save()
+        painter.setClipPath(pill_path)
+        painter.setPen(Qt.PenStyle.NoPen)
+
+        # 1a. Optical Frosted Backdrop Blur (softens underlying sharp desktop text)
+        if self._frosted_backdrop is not None and not self._frosted_backdrop.isNull():
+            painter.save()
+            painter.setOpacity(self.current_opacity * (0.42 * (1.0 - norm_density * 0.45)))
+            src_rect = QRectF(rx, ry, draw_w, draw_h)
+            painter.drawPixmap(rect, self._frosted_backdrop, src_rect)
+            painter.restore()
+
+        top_alpha = int(min(252, 232 + 18 * norm_density))
+        upper_mid_alpha = int(min(242, 206 + 32 * norm_density))
+        lower_mid_alpha = int(min(220, 158 + 56 * norm_density))
+        bottom_glass_alpha = int(min(198, 118 + 72 * norm_density))
+
         surf_grad = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
-        surf_grad.setColorAt(0.0, QColor("#181d2b"))
-        surf_grad.setColorAt(0.5, QColor("#131722"))
-        surf_grad.setColorAt(1.0, QColor("#0d1018"))
+        surf_grad.setColorAt(0.00, QColor(5, 6, 10, top_alpha))
+        surf_grad.setColorAt(0.38, QColor(9, 11, 17, upper_mid_alpha))
+        surf_grad.setColorAt(0.72, QColor(15, 19, 28, lower_mid_alpha))
+        surf_grad.setColorAt(1.00, QColor(22, 27, 39, bottom_glass_alpha))
         painter.setBrush(QBrush(surf_grad))
+        painter.drawRect(rect)
 
-        # 2. Tactile Neomorphic Border per state
-        if self.state == "recording":
-            border_pen = QPen(QColor("#eb5e38"), 1.2)            # Coral / Orange Primary Action
-        elif self.state == "voice_edit":
-            border_pen = QPen(QColor("#7c83e0"), 1.2)            # Muted Indigo / Violet
-        elif self.state == "transcribing":
-            border_pen = QPen(QColor("#5861b5"), 1.1)            # Muted Indigo Processing
-        elif self.state == "done":
-            border_pen = QPen(QColor("#34d399"), 1.2)            # Mint / Green Positive State
-        elif self.state == "prompt":
-            border_pen = QPen(QColor("#f59e0b"), 1.2)            # Amber Warning
-        elif self.state in ("cancelled", "error"):
-            border_pen = QPen(QColor("#ef4444"), 1.2)            # Crimson Error
-        else:
-            border_pen = QPen(QColor("#2c344d"), 1.0)            # Neomorphic Graphite Rim
+        # =========================================================================
+        # 2. Subtle Lower Glass Lens Cushion (Delicate neutral light refraction at bottom)
+        # =========================================================================
+        hover_boost = int(10 * self.current_hover_glow)
+        cushion_grad = QLinearGradient(rect.left(), rect.top() + draw_h * 0.58, rect.left(), rect.bottom())
+        cushion_grad.setColorAt(0.00, QColor(255, 255, 255, 0))
+        cushion_grad.setColorAt(0.75, QColor(255, 255, 255, 6 + hover_boost // 2))
+        cushion_grad.setColorAt(1.00, QColor(255, 255, 255, 20 + hover_boost))
+        painter.setBrush(QBrush(cushion_grad))
+        painter.drawRect(rect)
 
-        painter.setPen(border_pen)
-        painter.drawRoundedRect(rect, radius, radius)
-
-        # 3. Fine Top Neomorphic Edge Highlight (1px top edge bevel)
-        bevel_grad = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.top() + draw_h * 0.45)
-        bevel_grad.setColorAt(0.0, QColor(255, 255, 255, 32))
-        bevel_grad.setColorAt(0.5, QColor(255, 255, 255, 6))
-        bevel_grad.setColorAt(1.0, QColor(0, 0, 0, 45))
-        spec_pen = QPen(QBrush(bevel_grad), 1.0)
-        painter.setPen(spec_pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-
-        # 4. Transcribing Subtle Indigo Sweep
+        # =========================================================================
+        # 3. Transcribing Subtle Glass Sweep (Only during processing)
+        # =========================================================================
         if self.state == "transcribing" and fluid_enabled and self.shimmer_phase <= 1.0:
             eased_progress = (1.0 - math.cos(self.shimmer_phase * math.pi)) * 0.5
             shimmer_x = rect.left() - 40.0 + (rect.width() + 80.0) * eased_progress
             shimmer_grad = QLinearGradient(shimmer_x - 35.0, rect.top(), shimmer_x + 35.0, rect.bottom())
-            shimmer_grad.setColorAt(0.0, QColor(124, 131, 224, 0))
-            shimmer_grad.setColorAt(0.5, QColor(124, 131, 224, 24))
-            shimmer_grad.setColorAt(1.0, QColor(124, 131, 224, 0))
+            shimmer_grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+            shimmer_grad.setColorAt(0.5, QColor(200, 210, 255, 16))
+            shimmer_grad.setColorAt(1.0, QColor(255, 255, 255, 0))
             painter.setBrush(QBrush(shimmer_grad))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(rect, radius, radius)
+            painter.drawRect(rect)
 
-        # 5. Coordinated Content Rendering
-        is_minimal = getattr(config.hud, "minimal_mode", False)
+        painter.restore()  # End interior pill_path clip
+
+        # =========================================================================
+        # 4. Ultra-Fine Specular Glass Rim (1.0px single neutral-glass border)
+        #    Subtle and dark at the top edge, smoothly catching neutral light along
+        #    the bottom curve with only a whisper (15%) of smoothly lerped state accent.
+        # =========================================================================
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        rim_hover = int(22 * self.current_hover_glow)
+        rim_grad = QLinearGradient(rect.left(), rect.top(), rect.left(), rect.bottom())
+        # Top edge: quiet, grounded specular sheen
+        rim_grad.setColorAt(0.00, QColor(255, 255, 255, min(255, 22 + rim_hover // 2)))
+        # Upper-mid sides: subtle dark glass edge
+        rim_grad.setColorAt(0.40, QColor(255, 255, 255, min(255, 18 + rim_hover // 3)))
+        # Lower sides: soft neutral glass reflection with a 15% whisper of live state color
+        side_r = int(255 * 0.85 + live_accent.red() * 0.15)
+        side_g = int(255 * 0.85 + live_accent.green() * 0.15)
+        side_b = int(255 * 0.85 + live_accent.blue() * 0.15)
+        rim_grad.setColorAt(0.78, QColor(side_r, side_g, side_b, min(255, 48 + rim_hover)))
+        # Bottom edge: clean, noble optical glass highlight (Screenshot 2 bottom edge)
+        rim_grad.setColorAt(1.00, QColor(side_r, side_g, side_b, min(255, 84 + rim_hover)))
+
+        border_pen = QPen(QBrush(rim_grad), 1.0)
+        painter.setPen(border_pen)
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), max(1.0, radius - 0.5), max(1.0, radius - 0.5))
+
+        # =========================================================================
+        # 5. Coordinated Single-Axis Content Rendering
+        #    (Symmetrical Apple Voice-Wave, Animated Icon Strokes & Airy Single-Line Text)
+        # =========================================================================
         threshold_w = 28.0 if is_minimal else 75.0
 
         if draw_w > threshold_w and self.current_scale > 0.35:
@@ -998,53 +1235,105 @@ class FloatingHUD(QWidget):
             eased_t = progress * progress * (3.0 - 2.0 * progress)
             center_origin = pill_cx - 24.0
             content_left = round(center_origin * (1.0 - eased_t) + rx * eased_t)
-            center_y = round(cy)
+            # Content tracks the rising/sinking capsule center plus a subtle Apple upward settle during crossfades
+            content_slide_y = (1.0 - self.content_fade_alpha) * 2.5 if (fluid_enabled and self._is_crossfading) else 0.0
+            center_y = round(ry + draw_h / 2.0 + content_slide_y)
 
             content_alpha = min(1.0, max(0.0, (self.current_opacity - 0.15) / 0.85))
             painter.save()
             painter.setOpacity(self.current_opacity * content_alpha * self.content_fade_alpha)
+            painter.setClipPath(pill_path)
 
-            clip_path = QPainterPath()
-            clip_path.addRoundedRect(rect, radius, radius)
-            painter.setClipPath(clip_path)
+            def _draw_crisp_text(x_pos: int, y_pos: int, text_str: str, font: QFont, fg_color: QColor):
+                """Renders text with a subtle backing shadow for clean legibility on translucent glass."""
+                painter.setFont(font)
+                painter.setPen(QColor(2, 4, 10, 165))
+                painter.drawText(x_pos, y_pos + 1, text_str)
+                painter.setPen(fg_color)
+                painter.drawText(x_pos, y_pos, text_str)
+
+            def _draw_single_axis_row(
+                text_left_x: int,
+                t_font: QFont,
+                s_font: QFont,
+                title_col: QColor,
+                sub_col: QColor,
+                show_sub_pill: bool = True,
+            ):
+                """
+                Renders primary status_text and secondary sub_text on a single horizontal axis (center_y)
+                with generous negative space above and below, plus a subtle recessed glass pill for sub_text.
+                """
+                right_edge = int(rx + draw_w - 12)
+                avail_w = max(20, right_edge - text_left_x)
+                tfm = QFontMetrics(t_font)
+                sfm = QFontMetrics(s_font)
+
+                title_str = self.status_text or ""
+                sub_str = self.sub_text or ""
+
+                title_y = int(round(center_y + (tfm.ascent() - tfm.descent()) / 2.0))
+                sub_y = int(round(center_y + (sfm.ascent() - sfm.descent()) / 2.0))
+
+                if not sub_str:
+                    disp_title = tfm.elidedText(title_str, Qt.TextElideMode.ElideRight, avail_w)
+                    _draw_crisp_text(text_left_x, title_y, disp_title, t_font, title_col)
+                    return
+
+                raw_title_w = tfm.horizontalAdvance(title_str)
+                raw_sub_w = sfm.horizontalAdvance(sub_str)
+                pill_pad_x = 6 if show_sub_pill else 0
+                gap = 10
+
+                if raw_title_w + gap + raw_sub_w + pill_pad_x * 2 <= avail_w:
+                    disp_title = title_str
+                    disp_sub = sub_str
+                else:
+                    max_sub_w = max(34, min(raw_sub_w, int(avail_w * 0.46)))
+                    disp_sub = sfm.elidedText(sub_str, Qt.TextElideMode.ElideRight, max_sub_w)
+                    actual_sub_w = sfm.horizontalAdvance(disp_sub)
+                    max_title_w = max(24, avail_w - actual_sub_w - pill_pad_x * 2 - gap)
+                    disp_title = tfm.elidedText(title_str, Qt.TextElideMode.ElideRight, max_title_w)
+
+                actual_sub_w = sfm.horizontalAdvance(disp_sub)
+                _draw_crisp_text(text_left_x, title_y, disp_title, t_font, title_col)
+
+                if actual_sub_w > 0:
+                    if show_sub_pill:
+                        tag_h = 17.0
+                        tag_w = float(actual_sub_w + pill_pad_x * 2)
+                        tag_rect = QRectF(right_edge - tag_w, center_y - tag_h / 2.0, tag_w, tag_h)
+                        painter.setPen(QPen(QColor(255, 255, 255, 18), 0.7))
+                        painter.setBrush(QBrush(QColor(255, 255, 255, 11)))
+                        painter.drawRoundedRect(tag_rect, tag_h / 2.0, tag_h / 2.0)
+                        sub_x = int(round(right_edge - pill_pad_x - actual_sub_w))
+                    else:
+                        sub_x = int(round(right_edge - actual_sub_w))
+                    _draw_crisp_text(sub_x, sub_y, disp_sub, s_font, sub_col)
 
             if self.state in ("recording", "voice_edit"):
-                is_voice_edit = (self.state == "voice_edit")
-                # Coral (#eb5e38) for recording, Muted Indigo (#7c83e0) for voice_edit
-                accent_color = QColor("#7c83e0") if is_voice_edit else QColor("#eb5e38")
-                vocal_bloom = max(0.0, min(1.0, (self.current_rms - 0.15) / 0.65))
-
-                if is_voice_edit:
-                    top_r = int(124 + 45 * vocal_bloom)
-                    top_g = int(131 + 45 * vocal_bloom)
-                    top_b = int(224 + 25 * vocal_bloom)
-                    top_color = QColor(top_r, top_g, top_b, 255)
-                    bot_color = QColor(88, 97, 181, 240)
-                else:
-                    top_r = int(235 + 20 * vocal_bloom)
-                    top_g = int(94 + 38 * vocal_bloom)
-                    top_b = int(56 + 24 * vocal_bloom)
-                    top_color = QColor(top_r, top_g, top_b, 255)
-                    bot_color = QColor(200, 68, 34, 240)
+                # Pure symmetrical 7-bar Apple Voice-Wave (merged dot + bars) using live lerped accent color
+                top_r = min(255, int(live_accent.red() + 20 * vocal_bloom))
+                top_g = min(255, int(live_accent.green() + 34 * vocal_bloom))
+                top_b = min(255, int(live_accent.blue() + 24 * vocal_bloom))
+                top_color = QColor(top_r, top_g, top_b, 255)
+                bot_color = QColor(
+                    max(0, int(live_accent.red() * 0.82)),
+                    max(0, int(live_accent.green() * 0.78)),
+                    max(0, int(live_accent.blue() * 0.80)),
+                    238,
+                )
 
                 if is_minimal:
-                    min_left = round(pill_cx - 24.0)
-                    pulse = ((math.sin(time.time() * 2.6) + 1.0) * 0.5) if fluid_enabled else 0.5
-                    halo_alpha = int(28 + 30 * pulse)
-                    painter.setBrush(QBrush(QColor(accent_color.red(), accent_color.green(), accent_color.blue(), halo_alpha)))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(min_left + 8), int(center_y)), 5, 5)
-
-                    painter.setBrush(QBrush(QColor(accent_color.red(), accent_color.green(), accent_color.blue(), 250)))
-                    painter.drawEllipse(QPoint(int(min_left + 8), int(center_y)), 3, 3)
-
-                    wave_x = min_left + 17
-                    bar_w = 2.2
-                    gap = 2.0
-                    max_bar_h = 14.0
+                    # Symmetrical 7-bar Apple Voice-Wave centered dead-center inside the minimal capsule
+                    bar_w = 2.4
+                    gap = 2.1
+                    bars_total_w = self.num_bars * bar_w + (self.num_bars - 1) * gap
+                    wave_x = pill_cx - bars_total_w / 2.0
+                    max_bar_h = 15.0
                     bar_r = bar_w / 2.0
                     painter.setPen(Qt.PenStyle.NoPen)
-                    for i in range(min(4, self.num_bars)):
+                    for i in range(self.num_bars):
                         bh = max(2.5, self.bar_heights[i] * max_bar_h)
                         bx = wave_x + i * (bar_w + gap)
                         by = center_y - (bh / 2.0)
@@ -1056,17 +1345,8 @@ class FloatingHUD(QWidget):
                         painter.drawRoundedRect(bar_rect, bar_r, bar_r)
 
                 else:
-                    pulse = ((math.sin(time.time() * 2.6) + 1.0) * 0.5) if fluid_enabled else 0.5
-                    halo_alpha = int(28 + 30 * pulse)
-                    halo_r = 4.5 + 1.0 * pulse
-                    painter.setBrush(QBrush(QColor(accent_color.red(), accent_color.green(), accent_color.blue(), halo_alpha)))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(content_left + 16), int(center_y)), int(halo_r), int(halo_r))
-
-                    painter.setBrush(QBrush(QColor(accent_color.red(), accent_color.green(), accent_color.blue(), 250)))
-                    painter.drawEllipse(QPoint(int(content_left + 16), int(center_y)), 3, 3)
-
-                    wave_x = content_left + 26
+                    # Symmetrical 7-bar Apple Voice-Wave on the left + single-axis label & timer pill
+                    wave_x = content_left + 15.0
                     bar_w = 2.5
                     gap = 2.0
                     max_bar_h = 16.0
@@ -1084,161 +1364,133 @@ class FloatingHUD(QWidget):
                         painter.setBrush(QBrush(bar_grad))
                         painter.drawRoundedRect(bar_rect, bar_r, bar_r)
 
-                    # Text labels (Cool white primary, legible blue-gray secondary)
-                    tfm = QFontMetrics(self.title_font)
-                    sfm = QFontMetrics(self.sub_font)
-                    t_asc = tfm.ascent()
-                    s_asc = sfm.ascent()
-                    total_text_h = t_asc + 2.0 + s_asc
-                    text_top = center_y - total_text_h / 2.0
-                    title_y = int(text_top + t_asc)
-                    sub_y = int(title_y + 2.0 + s_asc)
-
-                    painter.setPen(QColor("#f8fafc"))
-                    painter.setFont(self.title_font)
-                    painter.drawText(int(content_left + 66), title_y, self.status_text)
-
-                    painter.setPen(QColor("#a5b4fc") if self.state == "voice_edit" else QColor("#94a3b8"))
-                    painter.setFont(self.sub_font)
-                    painter.drawText(int(content_left + 66), sub_y, self.sub_text)
+                    sub_col = QColor("#a5b4fc") if self.state == "voice_edit" else QColor("#cbd5e1")
+                    _draw_single_axis_row(
+                        int(content_left + 53),
+                        self.title_font,
+                        self.sub_font,
+                        QColor("#f8fafc"),
+                        sub_col,
+                        show_sub_pill=True,
+                    )
 
             elif self.state == "transcribing":
                 angle = int((time.time() * 240) % 360) if fluid_enabled else 45
-                spin_pen = QPen(QColor("#7c83e0"), 1.8)
+                spin_cx = pill_cx if is_minimal else (content_left + 20.0)
+                spin_rect = QRectF(spin_cx - 6.5, center_y - 6.5, 13.0, 13.0)
+
+                track_pen = QPen(QColor(148, 163, 184, 42), 1.5)
+                painter.setPen(track_pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(spin_rect)
+
+                spin_pen = QPen(live_accent, 1.8)
                 spin_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                 painter.setPen(spin_pen)
-                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawArc(spin_rect, -angle * 16, 220 * 16)
 
-                if is_minimal:
-                    painter.drawArc(QRectF(pill_cx - 7, center_y - 7, 14, 14), -angle * 16, 220 * 16)
-                else:
-                    painter.drawArc(QRectF(content_left + 14, center_y - 7, 14, 14), -angle * 16, 220 * 16)
-
-                    tfm = QFontMetrics(self.title_font)
-                    sfm = QFontMetrics(self.sub_font)
-                    t_asc = tfm.ascent()
-                    s_asc = sfm.ascent()
-                    total_text_h = t_asc + 2.0 + s_asc
-                    text_top = center_y - total_text_h / 2.0
-                    title_y = int(text_top + t_asc)
-                    sub_y = int(title_y + 2.0 + s_asc)
-
-                    painter.setPen(QColor("#f8fafc"))
-                    painter.setFont(self.title_font)
-                    painter.drawText(int(content_left + 36), title_y, self.status_text)
-
-                    painter.setPen(QColor("#94a3b8"))
-                    painter.setFont(self.sub_font)
-                    painter.drawText(int(content_left + 36), sub_y, self.sub_text)
+                if not is_minimal:
+                    _draw_single_axis_row(
+                        int(content_left + 35),
+                        self.title_font,
+                        self.sub_font,
+                        QColor("#f8fafc"),
+                        QColor("#a5b4fc"),
+                        show_sub_pill=True,
+                    )
 
             elif self.state == "done":
-                if is_minimal:
-                    painter.setBrush(QBrush(QColor("#34d399")))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(pill_cx), int(center_y)), 6, 6)
+                badge_cx = float(pill_cx) if is_minimal else float(content_left + 18)
+                painter.setBrush(QBrush(live_accent))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QPointF(badge_cx, float(center_y)), 6.2, 6.2)
 
-                    painter.setPen(QPen(QColor("#0b0d14"), 1.5))
-                    painter.drawLine(int(pill_cx - 3), int(center_y), int(pill_cx - 1), int(center_y) + 2)
-                    painter.drawLine(int(pill_cx - 1), int(center_y) + 2, int(pill_cx + 3), int(center_y) - 2)
-                else:
-                    painter.setBrush(QBrush(QColor("#34d399")))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(content_left + 18), int(center_y)), 6, 6)
+                # Progressive animated checkmark stroke
+                p_icon = max(0.0, min(1.0, self.icon_draw_progress))
+                ep = p_icon * p_icon * (3.0 - 2.0 * p_icon)
+                painter.setPen(QPen(QColor("#060911"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p0 = QPointF(badge_cx - 3.0, float(center_y) + 0.1)
+                p1 = QPointF(badge_cx - 0.8, float(center_y) + 2.3)
+                p2 = QPointF(badge_cx + 3.1, float(center_y) - 2.1)
+                if ep > 0.01:
+                    seg1 = min(1.0, ep / 0.42)
+                    p1_cur = QPointF(p0.x() + (p1.x() - p0.x()) * seg1, p0.y() + (p1.y() - p0.y()) * seg1)
+                    painter.drawLine(p0, p1_cur)
+                if ep > 0.42:
+                    seg2 = min(1.0, (ep - 0.42) / 0.58)
+                    p2_cur = QPointF(p1.x() + (p2.x() - p1.x()) * seg2, p1.y() + (p2.y() - p1.y()) * seg2)
+                    painter.drawLine(p1, p2_cur)
 
-                    painter.setPen(QPen(QColor("#0b0d14"), 1.5))
-                    painter.drawLine(int(content_left + 15), int(center_y), int(content_left + 17), int(center_y) + 2)
-                    painter.drawLine(int(content_left + 17), int(center_y) + 2, int(content_left + 21), int(center_y) - 2)
-
-                    tfm = QFontMetrics(self.done_title_font)
-                    sfm = QFontMetrics(self.done_sub_font)
-                    t_asc = tfm.ascent()
-                    s_asc = sfm.ascent()
-                    total_text_h = t_asc + 2.0 + s_asc
-                    text_top = center_y - total_text_h / 2.0
-                    title_y = int(text_top + t_asc)
-                    sub_y = int(title_y + 2.0 + s_asc)
-
-                    painter.setPen(QColor("#f8fafc"))
-                    painter.setFont(self.done_title_font)
-                    painter.drawText(int(content_left + 34), title_y, self.status_text)
-
-                    painter.setPen(QColor("#34d399"))
-                    painter.setFont(self.done_sub_font)
-                    painter.drawText(int(content_left + 34), sub_y, self.sub_text)
+                if not is_minimal:
+                    _draw_single_axis_row(
+                        int(content_left + 33),
+                        self.done_title_font,
+                        self.done_sub_font,
+                        QColor("#f8fafc"),
+                        QColor("#34d399"),
+                        show_sub_pill=True,
+                    )
 
             elif self.state == "prompt":
-                if is_minimal:
-                    painter.setBrush(QBrush(QColor("#f59e0b")))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(pill_cx), int(center_y)), 6, 6)
+                badge_cx = float(pill_cx) if is_minimal else float(content_left + 18)
+                painter.setBrush(QBrush(live_accent))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QPointF(badge_cx, float(center_y)), 6.2, 6.2)
 
-                    painter.setPen(QPen(QColor("#0b0d14"), 1.5))
-                    painter.drawLine(int(pill_cx - 3), int(center_y), int(pill_cx + 3), int(center_y))
-                    painter.drawLine(int(pill_cx), int(center_y - 3), int(pill_cx), int(center_y + 3))
-                else:
-                    painter.setBrush(QBrush(QColor("#f59e0b")))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(content_left + 18), int(center_y)), 6, 6)
+                p_icon = max(0.0, min(1.0, self.icon_draw_progress))
+                ep = p_icon * p_icon * (3.0 - 2.0 * p_icon)
+                painter.setPen(QPen(QColor("#060911"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                if ep > 0.01:
+                    seg1 = min(1.0, ep / 0.5)
+                    painter.drawLine(QPointF(badge_cx - 3.0, float(center_y)), QPointF(badge_cx - 3.0 + 6.0 * seg1, float(center_y)))
+                if ep > 0.5:
+                    seg2 = min(1.0, (ep - 0.5) / 0.5)
+                    painter.drawLine(QPointF(badge_cx, float(center_y) - 3.0), QPointF(badge_cx, float(center_y) - 3.0 + 6.0 * seg2))
 
-                    painter.setPen(QPen(QColor("#0b0d14"), 1.5))
-                    painter.drawLine(int(content_left + 15), int(center_y), int(content_left + 21), int(center_y))
-                    painter.drawLine(int(content_left + 18), int(center_y - 3), int(content_left + 18), int(center_y + 3))
-
-                    tfm = QFontMetrics(self.done_title_font)
-                    sfm = QFontMetrics(self.done_sub_font)
-                    t_asc = tfm.ascent()
-                    s_asc = sfm.ascent()
-                    total_text_h = t_asc + 2.0 + s_asc
-                    text_top = center_y - total_text_h / 2.0
-                    title_y = int(text_top + t_asc)
-                    sub_y = int(title_y + 2.0 + s_asc)
-
-                    painter.setPen(QColor("#fef08a"))
-                    painter.setFont(self.done_title_font)
-                    painter.drawText(int(content_left + 34), title_y, self.status_text)
-
-                    painter.setPen(QColor("#f59e0b"))
-                    painter.setFont(self.done_sub_font)
-                    painter.drawText(int(content_left + 34), sub_y, self.sub_text)
+                if not is_minimal:
+                    _draw_single_axis_row(
+                        int(content_left + 33),
+                        self.done_title_font,
+                        self.done_sub_font,
+                        QColor("#fef08a"),
+                        QColor("#f59e0b"),
+                        show_sub_pill=True,
+                    )
 
             elif self.state in ("cancelled", "error"):
                 is_cancel = (self.state == "cancelled")
-                badge_color = QColor("#ef4444") if not is_cancel else QColor("#e11d48")
                 sub_color = QColor("#f87171") if not is_cancel else QColor("#fda4af")
+                badge_cx = float(pill_cx) if is_minimal else float(content_left + 18)
 
-                if is_minimal:
-                    painter.setBrush(QBrush(badge_color))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(pill_cx), int(center_y)), 6, 6)
+                painter.setBrush(QBrush(live_accent))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(QPointF(badge_cx, float(center_y)), 6.2, 6.2)
 
-                    painter.setPen(QPen(QColor("#ffffff"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                    painter.drawLine(int(pill_cx - 3), int(center_y) - 3, int(pill_cx + 3), int(center_y) + 3)
-                    painter.drawLine(int(pill_cx + 3), int(center_y) - 3, int(pill_cx - 3), int(center_y) + 3)
-                else:
-                    painter.setBrush(QBrush(badge_color))
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    painter.drawEllipse(QPoint(int(content_left + 18), int(center_y)), 6, 6)
+                p_icon = max(0.0, min(1.0, self.icon_draw_progress))
+                ep = p_icon * p_icon * (3.0 - 2.0 * p_icon)
+                painter.setPen(QPen(QColor("#ffffff"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                if ep > 0.01:
+                    seg1 = min(1.0, ep / 0.5)
+                    painter.drawLine(
+                        QPointF(badge_cx - 2.8, float(center_y) - 2.8),
+                        QPointF(badge_cx - 2.8 + 5.6 * seg1, float(center_y) - 2.8 + 5.6 * seg1),
+                    )
+                if ep > 0.5:
+                    seg2 = min(1.0, (ep - 0.5) / 0.5)
+                    painter.drawLine(
+                        QPointF(badge_cx + 2.8, float(center_y) - 2.8),
+                        QPointF(badge_cx + 2.8 - 5.6 * seg2, float(center_y) - 2.8 + 5.6 * seg2),
+                    )
 
-                    painter.setPen(QPen(QColor("#ffffff"), 1.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                    painter.drawLine(int(content_left + 15), int(center_y) - 3, int(content_left + 21), int(center_y) + 3)
-                    painter.drawLine(int(content_left + 21), int(center_y) - 3, int(content_left + 15), int(center_y) + 3)
-
-                    tfm = QFontMetrics(self.done_title_font)
-                    sfm = QFontMetrics(self.done_sub_font)
-                    t_asc = tfm.ascent()
-                    s_asc = sfm.ascent()
-                    total_text_h = t_asc + 2.0 + s_asc
-                    text_top = center_y - total_text_h / 2.0
-                    title_y = int(text_top + t_asc)
-                    sub_y = int(title_y + 2.0 + s_asc)
-
-                    painter.setPen(QColor("#f8fafc"))
-                    painter.setFont(self.done_title_font)
-                    painter.drawText(int(content_left + 34), title_y, self.status_text)
-
-                    painter.setPen(sub_color)
-                    painter.setFont(self.done_sub_font)
-                    painter.drawText(int(content_left + 34), sub_y, self.sub_text)
+                if not is_minimal:
+                    _draw_single_axis_row(
+                        int(content_left + 33),
+                        self.done_title_font,
+                        self.done_sub_font,
+                        QColor("#f8fafc"),
+                        sub_color,
+                        show_sub_pill=True,
+                    )
 
             painter.restore()
 

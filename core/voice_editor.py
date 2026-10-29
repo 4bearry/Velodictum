@@ -10,6 +10,7 @@ from typing import Optional
 class VoiceEditor:
     def __init__(self, ai_formatter):
         self.ai_formatter = ai_formatter
+        self.last_error: Optional[str] = None
 
     def transform_text(
         self,
@@ -21,6 +22,8 @@ class VoiceEditor:
         Executes spoken transformation instruction on the provided original text.
         Returns the transformed text, or empty string if no valid transformation occurred.
         """
+        self.last_error = None
+
         if not original_text or not original_text.strip():
             return ""
 
@@ -69,8 +72,16 @@ class VoiceEditor:
                 if cleaned and cleaned != instruction.strip() and cleaned != original_text.strip():
                     from custom_vocabulary import vocab_manager
                     vocab_manager.learn_correction(original_text, cleaned)
+                    self.last_error = None
                     return cleaned
         except Exception as e:
+            err_str = str(e)
+            if "api-key" in err_str.lower() or "api key" in err_str.lower() or "unauthorized" in err_str.lower() or "401" in err_str:
+                self.last_error = "API-Key fehlt in Einstellungen" if language == "de" else "API key missing in Settings"
+            elif "ollama" in err_str.lower() or "connection" in err_str.lower():
+                self.last_error = "Ollama nicht erreichbar" if language == "de" else "Ollama unreachable"
+            else:
+                self.last_error = f"{self.ai_formatter.engine}: {err_str[:40]}"
             print(f"[VoiceEditor] Primary provider ({self.ai_formatter.engine}) error: {e}")
 
         # 2. If provider is local rules or failed, check for available fallback LLMs (Ollama or API keys)
@@ -82,9 +93,10 @@ class VoiceEditor:
             OpenAIProvider,
             GroqProvider,
             LocalRulesProvider,
+            ensure_ollama_running,
         )
 
-        # Try Ollama if reachable (fast 150ms socket probe to avoid 2s Windows TCP refusal delay when offline)
+        # Try Ollama if reachable or local
         try:
             import socket
             import urllib.parse
@@ -97,6 +109,9 @@ class VoiceEditor:
         except Exception:
             ollama_reachable = False
 
+        if not ollama_reachable and ol_host in ("127.0.0.1", "localhost"):
+            ollama_reachable = ensure_ollama_running(ollama_url)
+
         if ollama_reachable:
             try:
                 ollama_model = getattr(config.formatting, "ollama_model", "qwen2.5:7b")
@@ -107,6 +122,7 @@ class VoiceEditor:
                     if cleaned and cleaned != instruction.strip() and cleaned != original_text.strip():
                         from custom_vocabulary import vocab_manager
                         vocab_manager.learn_correction(original_text, cleaned)
+                        self.last_error = None
                         return cleaned
             except Exception:
                 pass
@@ -146,6 +162,7 @@ class VoiceEditor:
                         if cleaned and cleaned != instruction.strip() and cleaned != original_text.strip():
                             from custom_vocabulary import vocab_manager
                             vocab_manager.learn_correction(original_text, cleaned)
+                            self.last_error = None
                             return cleaned
                 except Exception:
                     pass
@@ -158,7 +175,12 @@ class VoiceEditor:
             result = out.strip()
             from custom_vocabulary import vocab_manager
             vocab_manager.learn_correction(original_text, result)
+            self.last_error = None
             return result
+
+        if not self.last_error:
+            from core.i18n import tr
+            self.last_error = tr("hud_transform_not_possible")
 
         return ""
 

@@ -545,6 +545,43 @@ class LocalRulesProvider(BaseFormattingProvider):
         }
 
 
+def ensure_ollama_running(ollama_url: str = "http://127.0.0.1:11434") -> bool:
+    """Checks if Ollama daemon is running, and attempts auto-start if local and installed."""
+    import socket, urllib.parse, shutil, subprocess, os, time, sys
+    parsed = urllib.parse.urlsplit(ollama_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 11434
+    if host not in ("127.0.0.1", "localhost"):
+        return True
+    try:
+        with socket.create_connection((host, port), timeout=0.15):
+            return True
+    except Exception:
+        pass
+
+    ollama_exe = shutil.which("ollama")
+    if not ollama_exe:
+        cand = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+        if os.path.exists(cand):
+            ollama_exe = cand
+    if ollama_exe:
+        try:
+            flags = 0
+            if sys.platform == "win32":
+                flags = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            subprocess.Popen([ollama_exe, "serve"], creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(25):
+                time.sleep(0.15)
+                try:
+                    with socket.create_connection((host, port), timeout=0.15):
+                        return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return False
+
+
 class OllamaProvider(BaseFormattingProvider):
     """Local Ollama HTTP Daemon Provider."""
 
@@ -575,9 +612,19 @@ class OllamaProvider(BaseFormattingProvider):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with http_pool.urlopen(req, timeout=12.0) as resp:
-            res_json = json.loads(resp.read().decode("utf-8"))
-            return res_json.get("message", {}).get("content", text).strip()
+        try:
+            with http_pool.urlopen(req, timeout=15.0) as resp:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                return res_json.get("message", {}).get("content", text).strip()
+        except Exception as e:
+            if ensure_ollama_running(self.ollama_url):
+                try:
+                    with http_pool.urlopen(req, timeout=20.0) as resp:
+                        res_json = json.loads(resp.read().decode("utf-8"))
+                        return res_json.get("message", {}).get("content", text).strip()
+                except Exception:
+                    pass
+            raise e
 
     def structure_notes(self, text: str, system_prompt: str, user_message: str) -> str:
         payload = {
@@ -1272,6 +1319,15 @@ class UniversalApiProvider(BaseFormattingProvider):
                 "error": str(e),
             }
 
+    def transform_text(self, text: str, instruction: str, system_prompt: str, user_message: str) -> str:
+        key = self._resolve_api_key()
+        if not key:
+            raise ValueError(f"Kein API-Key hinterlegt ({detect_provider(self.endpoint, None)})")
+        out = self.format_text(text, system_prompt, user_message)
+        if out and out.strip() != text.strip():
+            return out.strip()
+        return ""
+
 
 class OpenAIProvider(BaseFormattingProvider):
     """Dedicated Official OpenAI Provider."""
@@ -1293,6 +1349,9 @@ class OpenAIProvider(BaseFormattingProvider):
 
     def structure_notes(self, text: str, system_prompt: str, user_message: str) -> str:
         return self._universal.structure_notes(text, system_prompt, user_message)
+
+    def transform_text(self, text: str, instruction: str, system_prompt: str, user_message: str) -> str:
+        return self._universal.transform_text(text, instruction, system_prompt, user_message)
 
     def test_connection(self) -> Dict[str, Any]:
         return self._universal.test_connection()
@@ -1376,6 +1435,15 @@ class GeminiProvider(BaseFormattingProvider):
             pass
         return text
 
+    def transform_text(self, text: str, instruction: str, system_prompt: str, user_message: str) -> str:
+        key = self._resolve_api_key()
+        if not key:
+            raise ValueError("Kein API-Key hinterlegt (Google Gemini)")
+        out = self.format_text(text, system_prompt, user_message)
+        if out and out.strip() != text.strip():
+            return out.strip()
+        return ""
+
     def test_connection(self) -> Dict[str, Any]:
         key = self._resolve_api_key()
         if not key:
@@ -1417,6 +1485,9 @@ class GroqProvider(BaseFormattingProvider):
 
     def structure_notes(self, text: str, system_prompt: str, user_message: str) -> str:
         return self._universal.structure_notes(text, system_prompt, user_message)
+
+    def transform_text(self, text: str, instruction: str, system_prompt: str, user_message: str) -> str:
+        return self._universal.transform_text(text, instruction, system_prompt, user_message)
 
     def test_connection(self) -> Dict[str, Any]:
         return self._universal.test_connection()
